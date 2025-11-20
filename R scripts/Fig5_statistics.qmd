@@ -1,0 +1,243 @@
+---
+title: "Fig5_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(aomisc)
+library(QurvE)
+library(PMCMRplus)
+library(QurvE)
+library(reshape2)
+library(ggplot2)
+library(ggpubr)
+library(round)
+library(car)
+library(lme4)
+library(emmeans)
+library(DHARMa)
+library(dplyr)
+library(stringr)
+library(extrafont)
+loadfonts(device = "win")
+library(propagate)
+library(scales)
+```
+
+## Specify path towards xlsx file
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on CFU reduction-data
+
+#### Reformat xlsx data
+
+```{r}
+xlsx_Surv.df<-as.data.frame(
+  read_excel(path=paste(dir.path,
+  "S18_Data.xlsx",sep="//")))
+new.colnames<-colnames(xlsx_Surv.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_Surv.df)<-new.colnames
+
+Surv.model.df<-melt(xlsx_Surv.df,id.vars="Time [h]",value.name = "survival",variable.name = "Strains")
+colnames(Surv.model.df)[1]<-"time"
+
+split_strains<-
+  lapply(as.character(Surv.model.df$Strain),
+                      function(x) strsplit(x,split="_")[[1]])
+
+Surv.model.df$Strains<-sapply(split_strains, function(x) x[1])
+Surv.model.df$Replicates<-sapply(split_strains, function(x) x[2])
+```
+
+```{r}
+Surv.model.df$time<-factor(Surv.model.df$time,
+                           levels=sort(unique(Surv.model.df$time)))
+models.list<-vector(length=4,mode="list")
+names(models.list)<-c(
+  "lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+models.list[[1]]<-lm(formula=log10(survival)~Strains*time,
+                 data=Surv.model.df)
+models.list[[2]]<-lmer(formula=log10(survival)~Strains*time+(1|Replicates),
+                 data=Surv.model.df)
+models.list[[3]]<-glm(formula=survival~Strains*time,
+                      data=Surv.model.df,
+                      family=stats::Gamma(link="log"))
+models.list[[4]]<-glmer(formula=survival~Strains*time+(1|Replicates),
+                    data=Surv.model.df,
+                    family=stats::Gamma(link="log"))
+aic_values<-sapply(models.list[1:4],AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.model<-models.list[[min.AIC]]
+print(names(models.list)[min.AIC])
+
+p<-interactions::interact_plot(model = preferred.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = "Rainbow",
+              vary.lty=T)          # Customize line colors
+
+print(p)
+
+#DHARMa model.validation
+sim_res <- simulateResiduals(fittedModel = preferred.model)
+plot(sim_res)
+
+summary(preferred.model)
+#Statistical interference
+em.interaction<-emmeans(preferred.model,~Strains|time)
+dunnett_test<-contrast(em.interaction,method="trt.vs.ctrl",ref="envZ*L116P")
+summary(dunnett_test)
+dunnett.df<-as.data.frame(summary(dunnett_test))
+```
+
+## Permeability statistics
+
+```{r}
+xlsx_Permeability.df<-as.data.frame(
+  read_excel(path=paste(dir.path,
+  "S20_Data.xlsx",sep="//")))
+
+new.colnames<-colnames(xlsx_Permeability.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_Permeability.df)<-new.colnames
+colnames(xlsx_Permeability.df)[1]<-"Strain"
+
+xlsx_Permeability_stat.df<-melt(
+  xlsx_Permeability.df,id.vars="Strain",variable.name="EtOH",
+     value.name="Permeability")
+
+split_EtOH<-
+  lapply(as.character(xlsx_Permeability_stat.df$EtOH),
+                      function(x) strsplit(x,split="_")[[1]])
+
+xlsx_Permeability_stat.df$EtOH<-sapply(split_EtOH, function(x) x[1])
+xlsx_Permeability_stat.df$Replicates<-sapply(split_EtOH, function(x) x[2])
+```
+
+```{r}
+#
+Porin<-vector(mode="character",length=dim(xlsx_Permeability.df)[1])
+Bckgrd<-vector(mode="character",length=dim(xlsx_Permeability.df)[1])
+for (r in 1:dim(xlsx_Permeability.df)[1]){
+  Porin[r]<-str_extract(xlsx_Permeability_stat.df$Strain[r],"dOmp\\w+|ompF_ompF")
+  extract.Bckgrd<-grepl("L116P",xlsx_Permeability_stat.df$Strain[r])
+  if (extract.Bckgrd==T){
+    Bckgrd[r]<-"envZ"
+  }else{
+    Bckgrd[r]<-"WT"
+  }
+}
+xlsx_Permeability_stat.df$Porin<-Porin
+xlsx_Permeability_stat.df$Porin[which(is.na(xlsx_Permeability_stat.df$Porin))]<-
+  "(-)"
+xlsx_Permeability_stat.df$Bckgrd<-Bckgrd
+
+xlsx_Permeability_stat.df$Bckgrd<-factor(xlsx_Permeability_stat.df$Bckgrd,
+                                         levels=c("WT","envZ"))
+xlsx_Permeability_stat.df$Porin<-factor(xlsx_Permeability_stat.df$Porin,
+                                    levels=unique(xlsx_Permeability_stat.df$Porin))
+```
+
+#### Correlate the permeability without ethanol vs. with ethanol
+
+```{r}
+Permeability_0.df<-subset(xlsx_Permeability_stat.df,
+                        xlsx_Permeability_stat.df$EtOH=="0% EtOH")  
+Permeability_5.df<-subset(xlsx_Permeability_stat.df,
+                        xlsx_Permeability_stat.df$EtOH=="5% EtOH")
+
+Permeability.lm<-merge(Permeability_0.df,
+                                Permeability_5.df,by="Strain")
+
+```
+
+```{r}
+#|label: basic-permeability-statistics
+Permeability.lm.stat<-Permeability.lm %>%
+  group_by(Bckgrd.x,Porin.x) %>%
+  reframe(
+    mean.x=mean(Permeability.x),
+    se.x=sd(Permeability.x)/sqrt(n()),
+    lower.x=mean.x-qt(0.975,df=n()-1)*se.x,
+    upper.x=mean.x+qt(0.975,df=n()-1)*se.x,
+    
+    mean.y=mean(Permeability.y),
+    se.y=sd(Permeability.y)/sqrt(n()),
+    lower.y=mean.y-qt(0.975,df=n()-1)*se.y,
+    upper.y=mean.y+qt(0.975,df=n()-1)*se.y,
+  )
+```
+
+```{r}
+#|label: linear_model
+
+breaks.y<-c(0, 2e5, 4e5, 6e5, 8e5)
+
+breaks.x<-c(5e4, 1e5, 1.5e5, 2e5)
+
+p.corr<-ggplot()+
+  geom_smooth(data=Permeability.lm,aes(x=Permeability.x,Permeability.y),
+              method="lm",se=T,color="black",fill="grey",linetype="dotted")+
+  geom_errorbar(data=Permeability.lm.stat,
+                aes(x=mean.x,ymin=lower.y,ymax=upper.y),
+                width=0.5,size=0.75,color="black")+
+  geom_errorbar(data=Permeability.lm.stat,
+                aes(y=mean.y,xmin=lower.x,xmax=upper.x),
+                width=0.5,size=0.75,color="black")+
+  geom_point(data=Permeability.lm.stat,aes(x=mean.x,y=mean.y,shape=Bckgrd.x,
+                                           fill=Porin.x),size=4)+
+  theme_classic()+
+  scale_y_continuous(labels=
+                seq(0,8,by=2),
+                breaks=breaks.y)+
+  scale_x_continuous(labels=seq(5,20,by=5),
+                breaks=breaks.x)+
+  labs(x="NPN uptake at 0 (v/v)%",y="NPN uptake at 5 (v/v)%",
+       shape="Background",fill="Omp composition")+
+  scale_fill_manual(values=c("#9B9B9B", "#FFC207","#760187","#A00000","#FFC207"))+
+  scale_shape_manual(values=c(21,23))+
+  theme(
+    axis.title=element_text(size=12,family="Calibri",face="bold",margin=margin(r=10)),
+    axis.text=element_text(size=11,family="Calibri"),
+    legend.position="none",
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+ggsave(plot=p.corr,
+       filename=paste(dir.path,"OutputFiles","Fig5-Correlation_lm.svg",sep="\\"),
+       width=70,height=60,units="mm")
+```

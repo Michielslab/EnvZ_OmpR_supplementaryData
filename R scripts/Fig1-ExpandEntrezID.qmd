@@ -1,0 +1,80 @@
+---
+title: "ExpandEntrezID"
+format: html
+editor: visual
+---
+
+## Required packages
+
+```{r}
+install.packages("readxl")
+install.packages("openxlsx")
+install.packages("BiocManager")
+BiocManager::install("org.EcK12.eg.db")
+BiocManager::install("clusterProfiler")
+```
+
+```{r}
+library(readxl)
+library(openxlsx)
+library(org.EcK12.eg.db)
+library(clusterProfiler)
+```
+
+## Open file
+
+```{r}
+#|label: open-files
+dir.open<-choose.dir()
+path.open<-paste(dir.open,"S1_Table.csv",sep="/")
+geneProtein.info.df<-read.csv2(path.open)
+```
+
+## Link gene name to ENTREZID
+
+```{r}
+#|label: linking-function
+findEntrezID<-function(x){
+    tryCatch(as.character(bitr(x,fromType = "SYMBOL",
+                toType = "ENTREZID",org.EcK12.eg.db)),
+           error=function(e) {return(NA)})
+  }
+```
+
+#### Looping over the geneProtein.info.df file
+
+```{r}
+entrezID<-vector(mode="character",length=dim(geneProtein.info.df)[1])
+gene.SYMBOL<-vector(mode="character",length=dim(geneProtein.info.df)[1])
+for (r in 1:dim(geneProtein.info.df)[1]){
+  geneNames<-gsub(
+    " ","",strsplit(geneProtein.info.df$Gene.synonyms[r],split=",")[[1]])
+  is.match=F
+  g=1
+  while(g<length(geneNames)+1 && is.match==F){
+    find.entrezID<-findEntrezID(geneNames[g])
+    if (length(find.entrezID)>1){
+      is.match=T
+      entrezID[r]=find.entrezID[2]
+      gene.SYMBOL[r]<-geneNames[g]
+    }
+    g=g+1
+  }
+}
+
+geneProtein.info.df$entrezID<-entrezID
+geneProtein.info.df$gene.SYMBOL<-gene.SYMBOL
+
+
+write.xlsx(geneProtein.info.df,
+           file=paste(dir.open,
+                      "Fig1_geneProteinEntrezID.xlsx",sep="\\"),rowNames=F)
+```
+
+#### Check linking efficiency
+
+```{r}
+#|label: Calculate-linking-percentage
+length(grep(pattern="\\d+",geneProtein.info.df$entrezID))/
+  dim(geneProtein.info.df)[1]*100
+```

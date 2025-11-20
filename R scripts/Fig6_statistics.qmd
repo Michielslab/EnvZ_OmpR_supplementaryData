@@ -1,0 +1,428 @@
+---
+rm---
+title: "Fig6_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(aomisc)
+library(QurvE)
+library(PMCMRplus)
+library(QurvE)
+library(reshape2)
+library(ggplot2)
+library(ggpubr)
+library(round)
+library(dplyr)
+library(extrafont)
+loadfonts(device = "win")
+library(lme4)
+library(DHARMa)
+library(emmeans)
+library(round)
+```
+
+## Specify path towards xlsx file
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on CFU reduction-data
+
+#### Reformat xlsx data
+
+```{r}
+xlsx_Surv.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S22_Data.xlsx",sep="//")))
+new.colnames<-colnames(xlsx_Surv.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_Surv.df)<-new.colnames
+
+Surv.model.df<-melt(xlsx_Surv.df,id.vars="Time [h]",value.name = "survival",variable.name = "Strain")
+colnames(Surv.model.df)[1]<-"time"
+
+split_strains<-
+  lapply(as.character(Surv.model.df$Strain),
+                      function(x) strsplit(x,split="_")[[1]])
+
+Surv.model.df$Strain<-sapply(split_strains, function(x) x[1])
+Surv.model.df$Replicates<-sapply(split_strains, function(x) x[2])
+```
+
+#### Fit linear models for the significant OmpR regulon hits
+
+```{r}
+strainsToRetain<-c("^WT$","^envZ\\*L116P$", "ompC", "lpcA", "tolC")
+
+Surv.model.hits.df<-Surv.model.df[grep(pattern=paste(strainsToRetain,
+                  collapse="|"),Surv.model.df$Strain),]
+Surv.model.hits.df$time<-factor(Surv.model.hits.df$time,
+                                levels=sort(unique(Surv.model.hits.df$time)))
+```
+
+```{r}
+#|label: model-building
+Surv.model.hits.df$Strain<-factor(Surv.model.hits.df$Strain,
+                                  levels=unique(Surv.model.hits.df$Strain))
+colorPalette=c("#9B9B9B", "black","#FFC207","#FFC207",
+                              "#0B588F","#0B588F","#FC6A10","#FC6A10")
+models.list<-vector(length=4,mode="list")
+names(models.list)<-c(
+  "lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+models.list[[1]]<-lm(formula=log10(survival)~Strain*time,
+                 data=Surv.model.hits.df)
+models.list[[2]]<-lmer(formula=log10(survival)~Strain*time+(1|Replicates),
+                 data=Surv.model.hits.df)
+models.list[[3]]<-glm(formula=survival~Strain*time,
+                      data=Surv.model.hits.df,
+                      family=stats::Gamma(link="log"))
+models.list[[4]]<-glmer(formula=survival~Strain*time+(1|Replicates),
+                      data=Surv.model.hits.df,
+                      family=stats::Gamma(link="log"))
+aic_values<-sapply(models.list[1:4],AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.model<-models.list[[min.AIC]]
+print(names(models.list)[min.AIC])
+
+p<-interactions::interact_plot(model = preferred.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strain,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=T)          # Customize line colors
+
+print(p)
+
+#DHARMa model.validation
+sim_res <- simulateResiduals(fittedModel = preferred.model)
+plot(sim_res)
+
+summary(preferred.model)
+#Statistical interference
+em.interaction<-emmeans(preferred.model,~Strain|time)
+dunnett_test<-contrast(em.interaction,method="trt.vs.ctrl",ref="WT")
+summary(dunnett_test)
+dunnett.df<-as.data.frame(summary(dunnett_test))
+```
+
+#### Split over WT and envZ\* background
+
+for envZ\*
+
+```{r}
+Surv.model.hits.envZ.df<-Surv.model.hits.df[grep(pattern="envZ\\*",Surv.model.hits.df$Strain),]
+
+colorPalette=c("black","#FFC207","#0B588F","#FC6A10")
+
+models.list.envZ<-vector(length=4,mode="list")
+names(models.list.envZ)<-c(
+  "lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+models.list.envZ[[1]]<-lm(formula=log10(survival)~Strain*time,
+                 data=Surv.model.hits.envZ.df)
+models.list.envZ[[2]]<-lmer(formula=log10(survival)~Strain*time+(1|Replicates),
+                 data=Surv.model.hits.envZ.df)
+models.list.envZ[[3]]<-glm(formula=survival~Strain*time,
+                      data=Surv.model.hits.envZ.df,
+                      family=stats::Gamma(link="log"))
+models.list.envZ[[4]]<-glmer(formula=survival~Strain*time+(1|Replicates),
+                      data=Surv.model.hits.envZ.df,
+                      family=stats::Gamma(link="log"))
+
+aic_values<-sapply(models.list.envZ[1:4],AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.model.envZ<-models.list.envZ[[min.AIC]]
+print(names(models.list.envZ)[min.AIC])
+
+p.envZ<-interactions::interact_plot(model = preferred.model.envZ,
+              pred = time,          # Predictor for x-axis
+              modx = Strain,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=T)          # Customize line colors
+
+print(p.envZ)
+
+#DHARMa model.validation
+sim_res.envZ <- simulateResiduals(fittedModel = preferred.model.envZ)
+plot(sim_res.envZ)
+
+summary(preferred.model.envZ)
+#Statistical interference
+em.interaction.envZ<-emmeans(preferred.model.envZ,~Strain|time)
+dunnett_test.envZ<-contrast(em.interaction.envZ,method="trt.vs.ctrl",ref="envZ*L116P")
+summary(dunnett_test.envZ)
+dunnett.evnZ.df<-as.data.frame(summary(dunnett_test.envZ))
+```
+
+for WT
+
+```{r}
+Surv.model.hits.WT.df<-Surv.model.hits.df[-grep(pattern="envZ\\*",Surv.model.hits.df$Strain),]
+
+colorPalette=c("black","#FFC207","#0B588F","#FC6A10")
+
+models.list.WT<-vector(length=4,mode="list")
+names(models.list.WT)<-c(
+  "lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+models.list.WT[[1]]<-lm(formula=log10(survival)~Strain*time,
+                 data=Surv.model.hits.WT.df)
+models.list.WT[[2]]<-lmer(formula=log10(survival)~Strain*time+(1|Replicates),
+                 data=Surv.model.hits.WT.df)
+models.list.WT[[3]]<-glm(formula=survival~Strain*time,
+                      data=Surv.model.hits.WT.df,
+                      family=stats::Gamma(link="log"))
+models.list.WT[[4]]<-glmer(formula=survival~Strain*time+(1|Replicates),
+                      data=Surv.model.hits.WT.df,
+                      family=stats::Gamma(link="log"))
+aic_values<-sapply(models.list.WT[1:4],AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.model.WT<-models.list.WT[[min.AIC]]
+print(names(models.list.WT)[min.AIC])
+
+p.WT<-interactions::interact_plot(model = preferred.model.WT,
+              pred = time,          # Predictor for x-axis
+              modx = Strain,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=T)          # Customize line colors
+
+print(p.WT)
+
+#DHARMa model.validation
+sim_res.WT <- simulateResiduals(fittedModel = preferred.model.WT)
+plot(sim_res.WT)
+
+summary(preferred.model.WT)
+#Statistical interference
+em.interaction.WT<-emmeans(preferred.model.WT,~Strain|time)
+dunnett_test.WT<-contrast(em.interaction.WT,method="trt.vs.ctrl",ref="WT")
+summary(dunnett_test.WT)
+dunnett.WT.df<-as.data.frame(summary(dunnett_test.WT))
+```
+
+## Correlation plot between permeability and survival
+
+```{r}
+xlsx_cor.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S24_Data.xlsx",sep="//")))
+
+#black, grey, purple, yellow, blue, orange, red
+cbPalette<-c("#000000","#9B9B9B","#760187","#FFC107", "#0B5990", "#FC6A10", "#BD3C05")
+#round, cubic, diamond
+symbol<-c(16,15,18)
+shapeSymb<-c()
+colorSymb<-c()
+for (r in seq(1,dim(xlsx_cor.df)[1])){
+  splitDash<-strsplit(as.character(xlsx_cor.df[r,1]),"_")[[1]]
+  l=length(splitDash)
+  if (l<2){
+    sy<-symbol[1] #default
+    if (splitDash[1]=="WT"){
+      cb=2
+    }else if (splitDash[1]=="L116P"){
+      cb=1
+      sy<-symbol[3]
+    }else if (splitDash[1]=="dOmpC"){
+      cb=4
+    }else if (splitDash[1]=="dOmpF"){
+      cb=3
+    }else if (splitDash[1]=="dOmpR"){
+      cb=7
+    }else if (splitDash[1]=="dTolC"){
+      cb=5
+    }else if (splitDash[1]=="dEnvZ"){
+      cb=2
+      sy=symbol[2]
+    }else{
+      cb=6
+    }
+  }else{
+    sy<-symbol[3]
+    if (splitDash[2]=="dOmpC"){
+      cb=4
+    }else if (splitDash[2]=="dOmpF"){
+      cb=3
+    }else if (splitDash[2]=="dOmpR"){
+      cb=7
+    }else if (splitDash[2]=="dTolC"){
+      cb=5
+    }else{
+      cb=6
+    }
+  }
+  
+  shapeSymb<-c(shapeSymb, sy)
+  colorSymb<-c(colorSymb,cbPalette[cb])
+}
+
+xlsx_cor.df2<-cbind.data.frame(xlsx_cor.df,shapeSymb,colorSymb)
+
+sizeSymbol<-rep(4,dim(xlsx_cor.df2)[1])
+for (r in seq(1,dim(xlsx_cor.df2)[1])){
+  if (xlsx_cor.df2[r,4]==18){
+    sizeSymbol[r]=5
+  }
+}
+
+df_cor<-cbind.data.frame(xlsx_cor.df2,sizeSymbol)
+colnames(df_cor)<-c("strains","X", "Y","shapeSymb","colorSymb","sizeSymbol")
+```
+
+```{r}
+cor_test<-cor.test(df_cor$Y, df_cor$X, method="spearman",exact=FALSE)
+cor_p<-format.pval(cor_test$p.value,digits=2,eps=0.001,nsmall=3)
+cor_est<-roundX(cor_test$estimate,3,"r1.C")
+
+if (strsplit(cor_p,"")[[1]][1]=="<"){
+  pVal=paste('p',cor_p,sep='')
+}else{
+  pVal=paste('p',cor_p,sep='=')
+}
+
+L1=paste(paste('r=',cor_est,sep=''),pVal,sep=" ; ")
+
+yLab="mean(survival fraction)"
+```
+
+```{r}
+p1<-ggplot(df_cor,aes(x=X,y=Y,shape=I(shapeSymb),color=I(colorSymb),size=I(sizeSymbol)))+
+  geom_smooth(colour="black",fill="lightgrey",method='lm') + geom_point(size=3) +
+  theme_bw() + theme(panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank())+
+  ylab(yLab)+
+  annotate("text",label=L1,x=0.85*max(df_cor$X),y=0.85*max(df_cor$Y),
+           family="Calibri",size=3)
+p2<-p1+theme(axis.text.x = element_text(family="Calibri",face="plain", color="black",size=11, angle=0), 
+             axis.text.y=element_text(family="Calibri",face="plain", color="black",size=11, angle=0), 
+             axis.title.x = element_text(family="Calibri",face="bold", color="black",size=12, angle=0), 
+             axis.title.y = element_text(family="Calibri",face="bold", color="black",size=12, angle=90))
+
+p3<-p2+
+  scale_y_continuous(trans = 'log10',
+                    breaks = c(0.1, 1, 10),
+                    limits=c(0.1,10),
+                    labels=scales::label_log())+
+  scale_x_continuous(limits=c(1.2e5,2.9e5),
+                     breaks=seq(1.2e5,2.9e5,by=4e4),
+                     labels=function(x) sprintf("%.1f", x / 1e5))+
+  labs(x=expression("mean(NPN uptake) x"~10^5))
+sLabel="mean survival"
+
+p3
+
+fileName<-paste0("Fig6_",paste(paste(sLabel,"mean(NPN uptake)",sep=" vs "),"svg",sep="."))
+
+ggsave(p3, file=paste(dir.path,"OutputFiles",fileName,sep="\\"), 
+       width=65, height=55, units="mm", dpi=300)
+```
+
+## The effect of each deletion on NPN uptake under 5% ethanol
+
+```{r}
+xlsx_Perm.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S23_Data.xlsx",sep="//")))
+new.colnames<-colnames(xlsx_Perm.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_Perm.df)<-new.colnames
+colnames(xlsx_Perm.df)[1]<-"Strain"
+
+Perm.model.df<-melt(xlsx_Perm.df,id.vars="Strain",value.name = "NPN uptake",variable.name = "Condition")
+
+split_conditions<-
+  lapply(as.character(Perm.model.df$Condition),
+                      function(x) strsplit(x,split="_")[[1]])
+
+Perm.model.df$Condition<-sapply(split_conditions, function(x) x[1])
+Perm.model.df$Replicates<-sapply(split_conditions, function(x) x[2])
+```
+
+Only retain 5% EtOH condition and
+
+```{r}
+Perm.model5.df<-subset(Perm.model.df,Perm.model.df$Condition=="5% EtOH")
+Bckgrd<-vector(mode="character",length=dim(Perm.model5.df)[1])
+Deletion<-vector(mode="character",length=dim(Perm.model5.df)[1])
+for (r in 1:dim(Perm.model5.df)[1]){
+  if (grepl(pattern="L116P",Perm.model5.df$Strain[r])==T){
+    Bckgrd[r]="envZ"
+  }else{
+    Bckgrd[r]="WT"
+  }
+  Deletion[r]<-str_extract(Perm.model5.df$Strain[r],"d[a-zA-Z]+")
+}
+Perm.model5.df$Bckgrd<-as.factor(Bckgrd)
+Perm.model5.df$Deletion<-Deletion
+```
+
+```{r}
+Perm.model5.df<-Perm.model5.df[
+  -c(grep(pattern=paste(c("ompF_ompF","dOmpF","dOmpR"),collapse="|"),
+          Perm.model5.df$Strain)),]
+Perm.model5.df$Deletion[which(is.na(Perm.model5.df$Deletion))]<-"(-)"
+Perm.model5.df$Deletion<-as.factor(Perm.model5.df$Deletion)
+colnames(Perm.model5.df)[3]<-"NPNuptake"
+```
+
+```{r}
+#|label: construct-linear-models
+Perm.model5.df$Bckgrd<-factor(Perm.model5.df$Bckgrd,
+                              levels=c("WT","envZ"))
+#model building
+lm.deletions<-lm(NPNuptake~Bckgrd*Deletion,data=Perm.model5.df)
+lmer.deletions<-lmer(NPNuptake~Bckgrd*Deletion+(1|Replicates),data=Perm.model5.df)
+AIC(lm.deletions)
+AIC(lmer.deletions) #lmer model has lowest AIC
+
+#model validation
+sim_res.lmer <- simulateResiduals(fittedModel = lmer.deletions)
+plot(sim_res.lmer)
+
+summary(lmer.deletions)
+
+#post hoc testing
+emms.deletions<-emmeans(lmer.deletions,~Deletion|Bckgrd)
+dunnett_test.deletions <- contrast(emms.deletions, method = "trt.vs.ctrl",
+                                   ref="(-)",adjust="dunnett")
+summary(dunnett_test.deletions)
+
+dunnett_test.deletions.df<-as.data.frame(dunnett_test.deletions)
+write.xlsx(dunnett_test.deletions.df,file=paste(
+  dir.path,"OutputFiles","Fig6-NPNstatistics.deletions.xlsx",
+  sep="\\"
+))
+```

@@ -1,0 +1,827 @@
+---
+title: "Identification of ethanol-tolerance conferring pathways in E. coli"
+author: "Thomas Schalck"
+format: html
+editor: visual
+bibliography: references.bib
+---
+
+## Required packages
+
+```{r}
+library(readxl)
+library(openxlsx)
+library(doBy)
+library(dplyr)
+library(tidyr)
+library(org.EcK12.eg.db)
+library(clusterProfiler)
+library(dipsaus)
+library(GOfuncR)
+library(ggplot2)
+library(ggpubr)
+library(RColorBrewer)
+library(readr)
+library(stringr)
+library(reshape2)
+```
+
+When not installed yet, the last two packages can be installed from the `BiocManager` (Bioconductor) or from `GitHub`
+
+```{r}
+BiocManager::install("clusterProfiler",update=F, force=T)
+BiocManager::install("org.EcK12.eg.db",update=F,force=T)
+BiocManager::install("ComunidadBioinfo/regutools")
+devtools::install_github("sgrote/GOfuncR")
+```
+
+## Open directory
+
+```{r}
+#| label: open-IAMBEE-dataset
+dir.open<-choose.dir()
+path.open<-paste(dir.open,"S1_Data.xlsx",sep="/")
+IAMBEE_mutationSet.df<-as.data.frame(read_excel(path.open,col_names=T))
+```
+
+```{r}
+#|label: general-statistics
+number_genes<-length(unique(IAMBEE_mutationSet.df$locus))
+print(number_genes)
+
+n_populations<-length(unique(IAMBEE_mutationSet.df$population))
+print(n_populations)
+```
+
+## Store the gene name and substitution separately
+
+```{r}
+#| label: store-gene-substitution
+gene<-as.character(lapply(
+  IAMBEE_mutationSet.df$mutation,function (x) strsplit(x,split="_")[[1]][1]))
+substitution<-as.character(lapply(
+  IAMBEE_mutationSet.df$mutation,function (x) strsplit(x,split="_")[[1]][2]))
+
+IAMBEE_mutationSet.df2<-cbind.data.frame(
+  IAMBEE_mutationSet.df[,1:5],gene, substitution,
+  IAMBEE_mutationSet.df[,6:dim(IAMBEE_mutationSet.df)[2]])
+```
+
+## Compiling mutational matrices per population
+
+```{r}
+#| label: extract-unique-mutations
+uniquePopulations<-unique(as.character(IAMBEE_mutationSet.df2$population))
+
+uniqueMutations<-unique(as.character(IAMBEE_mutationSet.df2$mutation))
+
+EtOH_levels<-unique(IAMBEE_mutationSet.df2$EtOH)
+
+subsetDf<-distinct(
+  orderBy(~mutation,data=subset(IAMBEE_mutationSet.df2,
+                      select=c(mutation,locus))),mutation,.keep_all = TRUE)
+```
+
+```{r}
+#| label: construct-mutationPatternMatrix
+for (p in seq(1,length(uniquePopulations))){
+  refDf=data.frame(
+    matrix(NA,nrow=length(uniqueMutations),ncol=length(EtOH_levels)+1))
+  rownames(refDf)<-subsetDf$mutation
+  refDf[,1]=subsetDf$locus
+  colnames(refDf)<-c("locus",as.character(EtOH_levels))
+  mutation_pop.df2<-subset(
+    IAMBEE_mutationSet.df2,
+    IAMBEE_mutationSet.df2$population==uniquePopulations[p])
+  for (e in seq(2,dim(refDf)[2])){
+    mutation_pop_EtOH.df2<-subset(
+      mutation_pop.df2,mutation_pop.df2$EtOH==as.numeric(colnames(refDf)[e]))
+    if(dim(mutation_pop_EtOH.df2)[1]!=0){
+      for (r in seq(1,dim(refDf)[1])){
+        if(!is.na(match(rownames(refDf)[r],
+                        as.character(mutation_pop_EtOH.df2$mutation)))){
+          refDf[r,e]=1
+        }else{
+          refDf[r,e]=0
+        }
+      }
+    }else{
+      refDf[,e]=0
+    }
+  }
+  assign(
+    paste(paste(
+      "mutationPattern",as.character(uniquePopulations[p]),sep="_"),
+      "df",sep="."),refDf)
+}
+```
+
+Clear temporary variables from the global environment using the
+
+```{r}
+#| label: clear-environment
+retain.variables<-c(
+  match("dir.open",ls()),grep(pattern="mutationPattern_",ls()))
+rm(list=ls()[-retain.variables])
+```
+
+#### Link gene names to UniProtKB ID
+
+```{r}
+#| label: link-geneNames-UniprotKBid
+template.df<-get(ls()[3])
+geneList<-as.character(
+  lapply(rownames(template.df),function(x) strsplit(x,split="_")[[1]][1]))
+path.open<-paste(dir.open,"S1_Table.csv",sep = "\\")
+UniprotList<-read.csv2(path.open)
+UniprotAccessionID.v<-c()
+for (r in seq(1,dim(template.df)[1])){
+  gene<-geneList[r]
+  r.select=grep(gene,UniprotList$Gene.synonyms)
+  if(length(r.select)==1){
+    UniprotAccessionID.v<-c(
+      UniprotAccessionID.v,as.character(UniprotList[r.select,1]))
+  }else{
+    r.select2=grep(as.character(template.df$locus[r]),UniprotList$locus)
+    if(length(r.select2)==1){
+      UniprotAccessionID.v<-c(
+        UniprotAccessionID.v,as.character(UniprotList[r.select2,1]))
+    }else{
+      UniprotAccessionID.v<-c(UniprotAccessionID.v,NA)
+    }
+  }
+}
+UniprotAccessionID.summary<-cbind.data.frame(geneList,UniprotAccessionID.v)
+```
+
+Genes for which no UniprotKB ID could be retrieved, these genes include phage and putative genes.
+
+```{r}
+#| label: genes-without-uniprotID
+unique(subset(UniprotAccessionID.summary,is.na(UniprotAccessionID.summary$UniprotAccessionID.v))$geneList)
+```
+
+Add the UniprotKB ID to the `mutationPattern` matrices.
+
+```{r}
+#|label: add-UniprotKBid
+mutationPattern.v<-ls()[grep("mutationPattern_",ls())]
+column.names<-c("locus","UniprotID",colnames(template.df)[2:dim(template.df)[2]])
+for (m in seq(1,length(mutationPattern.v))){
+  getDf<-get(mutationPattern.v[m])
+  df<-cbind.data.frame(getDf[,1],UniprotAccessionID.v)
+  df2<-cbind.data.frame(df,getDf[,2:dim(getDf)[2]])
+  colnames(df2)<-column.names
+  assign(mutationPattern.v[m],df2)
+}
+```
+
+## Summarize the global mutation pattern across all populations
+
+```{r}
+colNamesGlobal<-colnames(template.df)[
+  grep(pattern="[0-9]",colnames(template.df))]
+globalPattern.df<-data.frame(
+  matrix(0,nrow=dim(template.df)[1],ncol=length(colNamesGlobal)))
+colnames(globalPattern.df)<-colNamesGlobal
+for (m in seq(1,length(mutationPattern.v))){
+  getDf<-get(mutationPattern.v[m])[,3:10] #only retain the binary columns
+  globalPattern.df=globalPattern.df+getDf
+}
+
+globalPattern.df<-cbind.data.frame(template.df[,1],globalPattern.df,UniprotAccessionID.v)
+colnames(globalPattern.df)[c(1,dim(globalPattern.df)[2])]<-c("locus","UniprotID")
+rownames(globalPattern.df)<-rownames(template.df)
+```
+
+## Determine the mutational load across all populations over all ethanol levels
+
+Calculate the occurrence of any mutation in the gene (regardless of the type of mutation) among all mutations across all ethanol levels.
+
+```{r}
+globalPattern_genes.df<-data.frame(
+  matrix(nrow=0,ncol=dim(globalPattern.df)[2]))
+colnames(globalPattern_genes.df)<-colnames(globalPattern.df)
+uniqueLoci<-unique(globalPattern.df$locus)
+for (l in 1:length(uniqueLoci)){
+  globalPattern_locus.df<-subset(
+    globalPattern.df,globalPattern.df$locus==uniqueLoci[l])
+  col.range<-2:(dim(globalPattern_locus.df)[2]-1)
+  sumGlobalPattern_EtOH.v<-vector(mode="numeric",length=length(col.range))
+  for (c in col.range){
+    sumGlobalPattern_EtOH.v[c-1]=sum(globalPattern_locus.df[,c])
+  }
+  sumGlobalPattern_locus.df<-rbind.data.frame(
+    c(unique(globalPattern_locus.df[,1]),
+      sumGlobalPattern_EtOH.v,
+      unique(globalPattern_locus.df[,dim(globalPattern_locus.df)[2]])))
+  colnames(sumGlobalPattern_locus.df)<-colnames(globalPattern.df)
+  rownames(sumGlobalPattern_locus.df)<-strsplit(
+    rownames(globalPattern_locus.df),split="_")[[1]][1]
+  globalPattern_genes.df<-rbind.data.frame(
+    globalPattern_genes.df,sumGlobalPattern_locus.df)
+}
+
+meanOccurrence_genes<-vector(mode="numeric",
+                             length=dim(globalPattern_genes.df)[1])
+for (r in 1:length(meanOccurrence_genes)){
+  meanOccurrence_genes[r]<-mean(
+    as.numeric(globalPattern_genes.df[r,2:(dim(globalPattern_genes.df)[2]-1)]))
+}
+meanGlobalPattern_genes.df<-cbind.data.frame(
+  globalPattern_genes.df,meanOccurrence_genes
+)
+meanGlobalPattern_genes.df<-orderBy(
+  ~-meanOccurrence_genes,meanGlobalPattern_genes.df)
+```
+
+#### Determine the mutational load across all populations over all ethanol levels
+
+```{r}
+#|label: Retain-significant-hits
+meanOccurrence.cutoff<-1
+#Arbitrary cutoff set on on average the gene should be mutated once across all evolved populations at every ethanol level
+signinficantHits<-subset(
+  meanGlobalPattern_genes.df,
+  meanGlobalPattern_genes.df$meanOccurrence_genes>=meanOccurrence.cutoff)
+
+```
+
+```{r}
+#|label: Attach-entrezID
+#The excel file is derived from the Fig1-ExpandEntrezID.qmd script. If this excel datafile does not exist yet, this script should be run first.
+xlsx.open<-list.files(path=paste(dir.open,
+                      "OutputFiles",
+                      sep="\\"),pattern="geneProtein[a-zA-Z]+\\.xlsx$")
+if (length(xlsx.open)>0){
+  geneProtein.info.df<-read_excel(path=paste(dir.open,
+                      "OutputFiles",
+                      xlsx.open,
+                      sep="\\"))
+}
+
+entrezID<-vector(mode="character",length=dim(signinficantHits)[1])
+for (r in 1:dim(signinficantHits)[1]){
+  find.entrezID<-geneProtein.info.df$entrezID[
+    grep(pattern=rownames(signinficantHits)[r],
+       geneProtein.info.df$Gene.synonyms)]
+  if (length(find.entrezID)!=1){
+    find.entrezID<-geneProtein.info.df$entrezID[
+    grep(pattern=signinficantHits$UniprotID[r],
+       geneProtein.info.df$UniprotID)]
+  }
+  
+  if(length(find.entrezID)<1){
+    entrezID[r]<-""
+  }else{
+    if (length(find.entrezID)>1){
+      if (length(unique(find.entrezID))==1){
+        entrezID[r]<-unique(find.entrezID)
+      }else{
+        entrezID[r]="noMatch"
+      }
+    }
+    entrezID[r]<-find.entrezID
+  }
+}
+
+signinficantHits$entrezID<-entrezID
+
+selected.genes_list<-setNames(
+  as.list(signinficantHits$entrezID),rownames(signinficantHits)
+)
+
+selected.UniprotIDs<-subset(signinficantHits,select=c("UniprotID","entrezID"))
+
+write.xlsx(selected.UniprotIDs,file=
+             paste(dir.open,"OutputFiles",
+                   "Fig1-RelevantEthanolProteins.xlsx",sep="\\"),rowNames=T)
+```
+
+## GO enrichment
+
+#### using GOfuncR
+
+```{r}
+#|label: compile-gene_ids-dataframe
+Is_candidate<-rep(0,dim(geneProtein.info.df)[1])
+for (c in 1:length(Is_candidate)){
+  if (!is.na(
+    match(
+      geneProtein.info.df$UniprotID[c],signinficantHits$UniprotID))){
+    Is_candidate[c]=1
+  }
+}
+
+input.go.dataframe<-na.omit(data.frame(
+  gene_ids=geneProtein.info.df$gene.SYMBOL,is_candidate=Is_candidate
+))
+```
+
+```{r}
+#|label: perform-GO-enrichment
+enriched.go<-go_enrich(input.go.dataframe,orgDb='org.EcK12.eg.db')
+go.stats<-enriched.go[[1]]
+
+significant.enriched<-go.stats[
+  go.stats$raw_p_underrep<=0.05|go.stats$raw_p_overrep<=0.05,
+]
+```
+
+```{r}
+#|label: export-GO-statistics
+wb=createWorkbook()
+for (GO in unique(significant.enriched$ontology)){
+  sheet_name<-GO
+  GO.subset<-subset(significant.enriched,
+                    significant.enriched$ontology==GO)
+  addWorksheet(wb,sheet_name)
+  writeData(wb,sheet_name,GO.subset)
+}
+saveWorkbook(wb,file=paste(dir.open,"OutputFiles","Fig1-GO_summary.xlsx",sep="\\"
+                           ),overwrite=T)
+```
+
+At the same time I also performed a GO enrichment using the UniProtKB ID from the list of genes in the `RelevantEthanolProteins.xlsx` file. The corresponding barplot files are stored in the `ResultFiles` folder with the names: `ShinyGo_barplot_xx.svg` (`CC`= cellular component, `MF` = Molecular Function, `BP` = Biological Process).
+
+## Two-Component-System statistics
+
+```{r}
+#|label: erase-global-environment
+rm(list=ls()[-match("dir.open",ls())])
+```
+
+```{r}
+#|label: open-IAMBEE-dataset
+path.open<-paste(dir.open,"S1_Data.xlsx",sep="/")
+IAMBEE_mutationSet.df<-as.data.frame(read_excel(path.open,col_names=T))
+```
+
+```{r}
+#|label: seperate-gene-and-allele
+gene<-as.character(
+  lapply(IAMBEE_mutationSet.df$mutation,
+             function(x) strsplit(x,split="_")[[1]][1])
+)
+allele<-as.character(
+  lapply(IAMBEE_mutationSet.df$mutation,
+             function(x) strsplit(x,split="_")[[1]][2])
+)
+
+IAMBEEmutation.df2<-cbind.data.frame(IAMBEE_mutationSet.df[,1:5],gene,
+                allele,IAMBEE_mutationSet.df[,6:dim(IAMBEE_mutationSet.df)[2]])
+```
+
+A dataset comprising all known TCSs in E. coli was composed based on [KEGG TCS](https://www.genome.jp/kegg-bin/show_pathway?ko02020) in `csv` format.
+
+```{r}
+#|label: open-TCS-data
+TCS.df<-read.csv(paste(
+  dir.open,"S2_Table.csv",sep="\\"),sep=";")
+TCSlist<-TCS.df$Genes
+locusList<-TCS.df$locus
+```
+
+#### Retain TCS-related info from the IAMBEE dataset
+
+```{r}
+#|label: construct-TCS-evolved-dataset
+evolvedTCS.df<-data.frame(matrix(nrow=0,ncol=dim(IAMBEEmutation.df2)[2]))
+colnames(evolvedTCS.df)<-colnames(IAMBEEmutation.df2)
+TCS.v<-c()
+component.v<-c()
+for (r in seq(1,dim(IAMBEEmutation.df2)[1])){
+  gene.search<-grep(pattern=as.character(IAMBEEmutation.df2$gene[r]),TCSlist)
+  if (length(gene.search)!=0){
+    df=data.frame(IAMBEEmutation.df2[r,])
+    evolvedTCS.df<-rbind.data.frame(evolvedTCS.df,df)
+    rSelect<-gene.search[1]
+    TCS.v<-c(TCS.v,TCS.df$TCS.official[rSelect])
+    component.v<-c(component.v,TCS.df$components[rSelect])
+  }else{
+    locus.search<-grep(
+      pattern=as.character(IAMBEEmutation.df2$locus[r]),locusList)
+    if (length(locus.search)!=0){
+      df=data.frame(IAMBEEmutation.df2[r,])
+      evolvedTCS.df<-rbind.data.frame(evolvedTCS.df,df)
+      rSelect<-locus.search[1]
+      TCS.v<-c(TCS.v,TCS.df$TCS.official[rSelect])
+      component.v<-c(component.v,TCS.df$components[rSelect])
+    }
+  }
+}
+
+evolvedTCS.df<-cbind.data.frame(TCS.v,component.v,evolvedTCS.df)
+colnames(evolvedTCS.df)[c(1:2)]<-c("TCS","component")
+```
+
+#### Determine the frequency of each TCS-associated mutation
+
+Per `TCS`, `component` (S = sensor, RR = response regulator), `allele` (*i.e.* amino acid substitution), the mutation frequency of the given mutation (in a TCS component) is determined at each `EtOH` level. The `mean.frequency` (*cp*) is related to the coverage of the mutation among the populations in which the mutation is fixed. The `corrected.frequency` is the `mean.frequency` (*cp*)multiplied with the relative number of `populations` that have acquired the mutation. *E.g.* if a certain mutation emerged in two populations with a `frequency` of 80 and 90% then the `mean.frequency` is 85%, but the `corrected.frequency` is 85 x 2/16 = 10.625 %.
+
+```{r}
+n.populations=length(unique(IAMBEEmutation.df2$population))
+ethanol.levels=unique(IAMBEEmutation.df2$EtOH)
+frequencyTCS.df<-evolvedTCS.df %>%
+  dplyr::group_by(TCS,component,allele,EtOH) %>%
+  summarise(mean.frequency=mean(Frequency),
+            population.count=n(),
+            corrected.frequency=
+              mean.frequency*population.count/n.populations,
+            .groups="drop") %>%
+  group_by(TCS,component,allele)%>%
+  complete(
+    EtOH=ethanol.levels,
+    fill=list(
+      mean.frequency=0,population.count=0,corrected.frequency=0)
+  )
+
+write.xlsx(
+  x=frequencyTCS.df,paste(dir.open,"OutputFiles","Fig1-frequencyTableTCS.xlsx",sep="\\"),
+  rowNames=F)
+```
+
+The `globalScore` is defined as the average `corrected.frequency` across all ethanol levels. For convenience, I have sorted the resulting dataframe based on the `globalScore` (high-to-low).
+
+```{r}
+globalScore.df<-frequencyTCS.df %>%
+  group_by(TCS) %>%
+  reframe(
+    globalScore=sum(corrected.frequency)/n_distinct(EtOH)
+  ) %>%
+  arrange(desc(globalScore))
+```
+
+#### Graphical summary of the mutation frequency among the TCSs
+
+```{r}
+plot.list=vector(mode="list",length=dim(globalScore.df)[1])
+i=1
+export.dir<-paste(dir.open,"OutputFiles",
+                  "TCSfrequencyGraphs",sep="\\")
+dir.create(export.dir)
+for (t in globalScore.df$TCS){
+  subsetTCS<-subset(frequencyTCS.df,frequencyTCS.df$TCS==t)
+  frequency.intercept=
+    as.numeric(subset(globalScore.df,globalScore.df$TCS==t)[2])
+  frequency.intercept.label<-format(round(frequency.intercept,3),nsmall=3)
+  subsetTCS$component<-factor(subsetTCS$component,
+                        levels=unique(frequencyTCS.df$component))
+  subsetTCS$EtOH<-factor(subsetTCS$EtOH)
+  
+  fill.colors<-brewer.pal(n=length(unique(subsetTCS$allele)),
+                           name="Paired")
+  
+  frequency.plot<-ggplot(
+    subsetTCS,aes(x=EtOH,y=corrected.frequency,fill=factor(allele)))+
+    geom_hline(
+      yintercept=frequency.intercept,lty="dashed",color="#BD3C05",linewidth=1)+
+    geom_bar(
+      stat="identity",
+      position="stack",aes(colour=factor(component)),size=1)+
+    scale_y_continuous(expand=c(0,0),limits=c(0,100))+
+    theme_bw()+theme(panel.grid.minor=element_blank())+
+    labs(x="EtOH (v/v)%",y="frequency score",fill="allele",color="component")+
+    ggtitle(t)+
+    annotate("text",
+             label=frequency.intercept.label,
+             x=7.5,y=87.5,size=4,color="#BD3C05",fontface=2)+
+    scale_color_manual(values=c("white","black"))+
+    scale_fill_manual(values=fill.colors)
+  
+  plot.list[[i]]<-frequency.plot
+  ggsave(plot=frequency.plot,filename=
+           paste(export.dir,paste(t,"svg",sep="."),sep="\\"),
+         width=(210-10)/2,height=(297-10)/2.5,units="mm")
+  i=i+1
+}
+```
+
+## Analyse downstream regulated genes of TCS RR
+
+```{r}
+TCS.regulators<-subset(
+  TCS.df,TCS.df$components=="RR",select=c(Genes,locus)
+)
+```
+
+I downloaded the `NetworkRegulatorGene` file from the `RegulonDB` database ([NetworkRegulatorGene](https://regulondb.ccg.unam.mx/datasets)).
+
+```{r}
+#|label: open-NetworkRegulator-file
+open.tsv<-paste(dir.open,"S4_Table.tsv",sep="\\")
+lines<-read_lines(open.tsv)
+lines_table<-lines[!str_starts(lines,"#")]
+df<-do.call(rbind,strsplit(lines_table,"\\t"))
+NetworkRegulatorGene.df<-as.data.frame(
+  df,stringsAsFactors=F
+)
+
+colNames<-gsub("^[0-9]+\\)", "", NetworkRegulatorGene.df[1,])
+colnames(NetworkRegulatorGene.df)<-colNames
+NetworkRegulatorGene.df<-NetworkRegulatorGene.df[-1,]
+```
+
+#### Extract the downstream regulated genes for every response regulator
+
+Looking up the genes that are regulated downstream of each response regulator. I immediately also attached the `EntrezID` to each of the downstream regulated genes.
+
+```{r}
+RRandDownstreamGenes.list<-
+  vector(mode="list",length=dim(TCS.regulators)[1])
+xlsx.open<-list.files(path=paste(dir.open,
+                      "OutputFiles",
+                      sep="\\"),pattern="geneProtein[a-zA-Z]+\\.xlsx$")
+
+geneProtein.info.df<-read_excel(path=paste(dir.open,
+                      "OutputFiles",
+                      xlsx.open,
+                      sep="\\"))
+
+i=1
+for (r in TCS.regulators$Genes){
+  downstreamGenes<-NetworkRegulatorGene.df$regulatedName[
+    grep(pattern=r,NetworkRegulatorGene.df$RegulatorGeneName)
+  ]
+  list.genes<-vector(mode="list",length=length(downstreamGenes))
+  j=1
+  for (g in downstreamGenes){
+    get.index<-grep(pattern=g,geneProtein.info.df$Gene.synonyms)
+    if (length(get.index)>1){
+      for (x in get.index){
+        g.replace<-gsub(g,"",geneProtein.info.df$Gene.synonyms[x])
+        if (g.replace==""){
+          get.index=x
+        }else{
+          if (str_starts(g.replace,",")==T){
+            get.index=x
+          }
+        }
+      }
+    }
+    entrezID<-geneProtein.info.df$entrezID[get.index]
+    entrezID<-na.omit(entrezID)
+    list.genes[[j]]<-entrezID
+    names(list.genes)[j]<-g
+    j=j+1
+  }
+  RRandDownstreamGenes.list[[i]]<-list.genes
+  names(RRandDownstreamGenes.list)[i]<-r
+  i=i+1
+}
+```
+
+A quick check-up whether each downstream regulated genes has no more than one `EntrezID` (resulting from errornous matching).
+
+```{r}
+#|label: quick-list-check
+list.length<-vector(mode="list",
+                    length=length(RRandDownstreamGenes.list))
+for (r in 1:length(RRandDownstreamGenes.list)){
+  check="OK"
+  for (g in 1:length(RRandDownstreamGenes.list[[r]])){
+    if (length(RRandDownstreamGenes.list[[r]][[g]])>1){
+      check="NOK"
+    }
+  }
+  list.length[[r]]<-check
+  names(list.length)[r]<-names(RRandDownstreamGenes.list)[r]
+}
+```
+
+## Linking GO terms and GO definitions to each downstream regulated gene.
+
+Retrieving the GO-terms for each downstream regulated gene using the `AnnotationDbi` package.
+
+```{r}
+#|label: Lookingup-GO-terms
+GO.downstreamGenes.list<-list()
+i=1
+for (r in 1:length(RRandDownstreamGenes.list)){
+  for (g in 1:length(RRandDownstreamGenes.list[[r]])){
+    entrezID<-RRandDownstreamGenes.list[[r]][[g]]
+    if (length(entrezID)>0){
+      GO.data<-AnnotationDbi::select(
+        org.EcK12.eg.db,keys=entrezID,columns=c("GO","ONTOLOGY"),
+        keytype="ENTREZID"
+      )
+      GO.downstreamGenes.list[[i]]<-GO.data
+      names(GO.downstreamGenes.list)[i]<-names(
+      RRandDownstreamGenes.list[[r]])[g]
+      i=i+1
+    }
+  }
+}
+```
+
+```{r}
+#|label: extract-all-GOs-from-list
+extract_all_GO<-function(data_list){
+  GO<-lapply(data_list,function(x) x$GO)
+  unlist(GO,use.names=F)
+}
+```
+
+For the identified `GO space` here above, find the corresponding `GO definition`.
+
+```{r}
+#|label: find-GOdefinitions
+GO.space<-unique(extract_all_GO(GO.downstreamGenes.list))
+GO.definition<-vector(mode="character",length=length(GO.space))
+Ontology<-vector(mode="character",length=length(GO.space))
+i=1
+for (GO in GO.space){
+  GO.search<-GOfuncR::get_names(GO)
+  GO.definition[i]<-GO.search$go_name
+  Ontology[i]<-GO.search$root_node
+  i=i+1
+}
+GO.ontology.df<-cbind.data.frame(GO.space,
+                                 GO.definition,
+                                 Ontology)
+```
+
+We are particularly interested in downstream regulated genes that are involved in `membrane-associated transport` as this process was enriched during GO enrichment. Therefore we filter the `GO.ontology.df` dataset on `membrane` (for cellular component) and `transport` (in biological_process)
+
+```{r}
+GO.ontology.target.df<-GO.ontology.df %>%
+  dplyr::filter(
+  (Ontology=="cellular_component" & grepl("membrane",GO.definition))|
+  (Ontology=="biological_process") & grepl("transport",GO.definition))
+
+GO.target.CC<-subset(
+  GO.ontology.target.df,
+  GO.ontology.target.df$Ontology=="cellular_component",
+  select=GO.space)[,1]
+
+GO.target.BP<-subset(
+  GO.ontology.target.df,
+  GO.ontology.target.df$Ontology=="biological_process",
+  select=GO.space)[,1]
+```
+
+```{r}
+isTarget.list<-vector(mode="list",
+                      length=length(names(GO.downstreamGenes.list)))
+for (g in 1:length(names(GO.downstreamGenes.list))){
+  GO.CC.terms<-unique(GO.downstreamGenes.list[[g]]$GO[which(
+    GO.downstreamGenes.list[[g]]$ONTOLOGY=="CC"
+  )])
+  if (length(GO.CC.terms)>0){
+    is.CC.target<-any(GO.CC.terms %in% GO.target.CC)
+  }else{
+    is.CC.target=FALSE
+  }
+  
+  GO.BP.terms<-unique(GO.downstreamGenes.list[[g]]$GO[which(
+    GO.downstreamGenes.list[[g]]$ONTOLOGY=="BP"
+  )])
+  if (length(GO.BP.terms)>0){
+    is.BP.target<-any(GO.BP.terms %in% GO.target.BP)
+  }else{
+    is.BP.target=FALSE
+  }
+  
+  if (sum(is.CC.target,is.BP.target)==2){
+    is.target=TRUE
+  }else{
+    is.target=FALSE
+  }
+  
+  isTarget.list[[g]]<-is.target
+  names(isTarget.list)[g]<-names(GO.downstreamGenes.list)[g]
+}
+```
+
+## Summarize number of downstream genes with relevant GO terms linked to each TCS
+
+```{r}
+#|label: Summarize-GOstatistics-TCS
+TCS.statistics.df<-subset(TCS.df,
+                          TCS.df$components=="RR",
+                          select=c(TCS.official,Genes))
+TCS.statistics.df$n.downstreamGenes<-rep(NA,dim(TCS.statistics.df)[1])
+TCS.statistics.df$n.target.downstreamGenes<-
+  rep(NA,dim(TCS.statistics.df)[1])
+TCS.statistics.df$percentage.target<-rep(NA,dim(TCS.statistics.df)[1])
+colnames(TCS.statistics.df)[2]<-"ResponseRegulator"
+
+for (r in 1:dim(TCS.statistics.df)[1]){
+  RR=TCS.statistics.df$ResponseRegulator[r]
+  TCS.statistics.df$n.downstreamGenes[r]<-
+    length(RRandDownstreamGenes.list[[RR]])
+  target.count=0
+  for (g in names(RRandDownstreamGenes.list[[RR]])){
+    names.match<-match(g,names(isTarget.list))
+    if(!is.na(names.match)){
+      is.Target<-isTarget.list[[names.match]]
+      if (is.Target==T){
+        target.count=target.count+1
+      }
+    }
+  }
+  TCS.statistics.df$n.target.downstreamGenes[r]=target.count
+  TCS.statistics.df$percentage.target[r]<-
+    (target.count/TCS.statistics.df$n.downstreamGenes[r])*100
+}
+
+TCS.statistics.df<-orderBy(~-n.downstreamGenes,TCS.statistics.df)
+write.xlsx(TCS.statistics.df,file=
+             paste(dir.open,"OutputFiles",
+                   "Fig1 - summaryTCS_membrane_transport.xlsx",sep="\\"),
+           rowNames=F)
+```
+
+#### Graphical representation using barplot
+
+Prepare a helper dataframe first
+
+```{r}
+TCS.statistics.df$n.nonTarget.downstreamGenes<-
+  TCS.statistics.df$n.downstreamGenes- TCS.statistics.df$n.target.downstreamGenes
+
+TCS.statistics.plot.df<-TCS.statistics.df[
+  ,grep(pattern=paste(c("TCS","n\\.target","n\\.nonTarget"),
+                      collapse="|"),
+        colnames(TCS.statistics.df))
+]
+
+TCS.statistics.plot.df2<-melt(data=TCS.statistics.plot.df,
+                              id.vars="TCS.official",
+                              variable.name="target.type",
+                              value.name="n.genes")
+```
+
+```{r}
+TCS.statistics.plot.df2$TCS.official<-
+  factor(TCS.statistics.plot.df2$TCS.official,
+         levels = rev(TCS.statistics.df$TCS.official))
+
+TCS.statistics.plot.df2$target.type<-
+  factor(TCS.statistics.plot.df2$target.type,
+         levels=rev(unique(TCS.statistics.plot.df2$target.type)))
+
+pBarplot<-ggplot(
+  TCS.statistics.plot.df2,
+  aes(x=TCS.official,y=n.genes,fill=factor(target.type)))+
+  geom_bar(position="stack",stat="identity")+
+  labs(x="TCS",y="Number of downstream genes",
+       fill="Target-type")+
+  scale_y_continuous(breaks=seq(0,250,by=50),limits=c(0,250,by=50))+
+  coord_flip()+
+  scale_fill_manual(values=c(
+    "n.target.downstreamGenes"="black",
+    "n.nonTarget.downstreamGenes"="grey"),
+    labels=c("non-target","target"))+
+  theme_classic()+
+  theme(
+    text=element_text(family = "Calibri",11),
+    axis.text = element_text(family = "Calibri",11),
+    axis.title=element_text(
+      family="Calibri",12,face="bold",color="black"),
+      legend.position="bottom")
+ggsave(plot=pBarplot,filename=paste(dir.open,
+        "OutputFiles",
+        "FigS4-globalGeneTCScount.svg",sep="\\"))
+```
+
+#### Calculate priority score
+
+The priority score is defined as the `global frequency score` (*fscore*)(related to the occurrence of the TCS throughout adaptation towards high ethanol concentrations) multiplied with the `number of target downstream genes` (*N_MT*) of the TCS.
+
+```{r}
+#|label: Calculate-priority-score
+colnames(TCS.statistics.df)[1]<-"TCS"
+priorityScore.df<-TCS.statistics.df %>%
+  inner_join(globalScore.df,by="TCS") %>%
+  mutate(priorityScore=n.target.downstreamGenes*globalScore)%>%
+  arrange(desc(priorityScore))
+```
+
+And prepare a barplot
+
+```{r}
+priorityScore.df$TCS<-
+  factor(priorityScore.df$TCS,levels=rev(priorityScore.df$TCS))
+
+pBarplot.priority<-ggplot(
+  priorityScore.df,
+  aes(x=TCS,y=priorityScore,
+      label=sprintf("%0.3f",round(priorityScore,digits=3))),
+  fill="black")+
+  geom_bar(stat="identity")+
+  scale_y_continuous(breaks=seq(0,800,by=200),limits=c(0,800))+
+  coord_flip()+
+  theme_classic()+
+  theme(
+    text=element_text(family = "Calibri",11),
+    axis.text = element_text(family = "Calibri",11),
+    axis.title=element_text(
+      family="Calibri",12,face="bold",color="black"),
+      legend.position="bottom")+
+  geom_text(size=3,hjust=-0.25,colour="black")
+
+ggsave(plot=pBarplot.priority,filename=paste(dir.open,
+        "OutputFiles",
+        "Fig1-priorityScoreBarplot.svg",sep="\\"))
+```

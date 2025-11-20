@@ -1,0 +1,133 @@
+---
+title: "FigS6_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(aomisc)
+library(reshape2)
+library(PMCMRplus)
+library(emmeans)
+library(data.table)
+```
+
+## Specify path towards xlsx file
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on *omp* expression
+
+1.  Open xlsx file and transform into data frame for ANOVA testing
+2.  Perform multiple measures ANOVA testing
+
+```{r}
+omp.v<-c("ompC","ompF")
+for (o in omp.v){
+  if (o=="ompC"){
+    xlsx_omp.df<-as.data.frame(
+      read_excel(path=paste(dir.path,"S4_Data.xlsx",sep="//")))
+  }else{
+    xlsx_omp.df<-as.data.frame(
+      read_excel(path=paste(dir.path,"S5_Data.xlsx",sep="//")))
+  }
+  new.colnames<-colnames(xlsx_omp.df)
+  index=1
+  for (c in seq(2,length(new.colnames))){
+    if(grepl(pattern="\\d$",new.colnames[c])==F){
+      index=1
+      last.strain=new.colnames[c]
+      new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+    }else{
+      index=index+1
+      new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+    }
+  }
+  colnames(xlsx_omp.df)<-new.colnames
+  xlsx_omp.L.df<-melt(xlsx_omp.df,id.vars="Time [h]",variable.name="Strain",value.name = "Expression")
+  colnames(xlsx_omp.L.df)[1]<-"Time"
+  xlsx_omp.L.df$Strain<-gsub("_\\d$","",xlsx_omp.L.df$Strain)
+  xlsx_omp.L.df$Time=as.character(xlsx_omp.L.df$Time)
+  assign(paste(o,"L","df",sep="."),xlsx_omp.L.df)
+  omp.aov<-anova_test(data=xlsx_omp.L.df,dv=Expression,
+           formula=Expression~Strain*Time,within=c(Time,Strain))
+  assign(paste(o,"aov",sep="."),get_anova_table(omp.aov,correction = "auto"))
+}
+```
+
+### Perform Tamhane-Dunnett's post-hoc testing
+
+For `ompC`, the variable `strain` is significantly contributing to the variance.
+
+```{r}
+#|label: dunnett-post-hoc-OmpC
+OmpC.aov2<-aov(Expression~Strain,data=ompC.L.df)
+emm.ompC<-emmeans(OmpC.aov2,~Strain)
+dunnett_test_ompC<-contrast(emm.ompC,method="dunnett",ref="WT")
+OmpC.df<-as.data.frame(summary(dunnett.ompC))
+print(dunnett_test_ompC)
+```
+
+For `ompF`, the variable `strain` is significantly contributing to the variance.
+
+```{r}
+#|label: dunnett-post-hoc-OmpF
+OmpF.aov2<-aov(Expression~Strain,data=ompF.L.df)
+
+emms.OmpF<-emmeans(OmpF.aov2,~Strain)
+dunnett_test_ompF <- contrast(emms.OmpF, method = "dunnett", ref = "WT")
+OmpF.df<-as.data.frame(summary(dunnett_test_ompF))
+print(dunnett_test_ompF)
+```
+
+## Perform statistics on porin expression data
+
+### Open xlsx file and reshape data into ANOVA compatible dataframe
+
+```{r}
+#|label: reformat-data
+xlsx_porins.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S7_Data.xlsx",sep="//")))
+colnames(xlsx_porins.df)[1]<-"Strains"
+new.colnames<-colnames(xlsx_porins.df)
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    last.strain=new.colnames[c]
+  }else{
+    new.colnames[c]=last.strain
+  }
+}
+colnames(xlsx_porins.df)<-new.colnames
+xlsx_porins.L.df<-melt(setDT(xlsx_porins.df),id.vars=1,variable.name="Porins")
+colnames(xlsx_porins.L.df)[3]<-"Expression"
+xlsx_porins.L.df$Strains<-factor(
+  xlsx_porins.L.df$Strains,
+  levels=unique(as.character(xlsx_porins.L.df$Strains)))
+```
+
+```{r}
+#|label: perform-dunnett-statistics
+wb=createWorkbook()
+for (p in unique(as.character(xlsx_porins.L.df$Porins))){
+  addWorksheet(wb,p)
+  xlsx_porins.L.df_subsetP.df<-subset(xlsx_porins.L.df,
+                                      xlsx_porins.L.df$Porins==p)
+  xlsx_porins.L.df_subsetP.aov<-aov(Expression~Strains,
+                                    data=xlsx_porins.L.df_subsetP.df)
+  em_porins<-emmeans(xlsx_porins.L.df_subsetP.aov,~Strains)
+  dunnett_porins<-contrast(em_porins,method="dunnett",ref="WT")
+  writeData(wb,p,as.data.frame(summary(dunnett_porins)))
+}
+saveWorkbook(
+  wb,
+  paste(dir.path,"OutputFiles","FigS6_omp_statistics.xlsx",sep="\\"),overwrite=T)
+```

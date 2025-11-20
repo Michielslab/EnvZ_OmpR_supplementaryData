@@ -1,0 +1,201 @@
+---
+title: "ROSstress_expression"
+author: "ThomasSchalck"
+format: html
+editor: visual
+---
+
+## Required packages
+
+```{r}
+library(openxlsx)
+library(readxl)
+library(dplyr)
+library(DHARMa)
+library(lme4)
+library(emmeans)
+library(rstatix)
+```
+
+## Open file
+
+```{r}
+dir.open<-choose.dir()
+xlsx.files<-grep(pattern="^S2[7|8]_Data\\.xlsx", list.files(dir.open),value=T)
+```
+
+## Process file
+
+#### Log2.ratio at each time point
+
+The log2.ratio (at t=x)= log2((FITC_FSC)\|t=x/(FITC_FSC)\|t=x)
+
+```{r}
+#|label: calculate-expression-ratio
+j=1
+expression.data.list<-vector(mode="list",length=4)
+for (s in xlsx.files){
+  promoter.expression.df<-
+    as.data.frame(read_excel(paste(dir.open,s,sep="\\"))
+    )
+  promoter.expression.df$FITC_FSC<-
+    promoter.expression.df$mean.FITC/promoter.expression.df$mean.FSC
+  
+  unique.stressors<-unique(gsub("no","",promoter.expression.df$Stressor))
+  for (u in unique.stressors){
+    df<-promoter.expression.df[grep(pattern=u,promoter.expression.df$Stressor),]
+    df2 <- df %>%
+      group_by(Strain,time,Replicate) %>%
+      reframe(
+        log2.ratio<-log2(FITC_FSC[Stressor==u]/FITC_FSC[Stressor==paste0("no",u)])
+      )
+    colnames(df2)[dim(df2)[2]]<-"log2.ratio"
+    expression.data.list[[j]]<-df2
+    names(expression.data.list)[j]<-paste(s,u,sep="_")
+    j=j+1
+  }
+}
+```
+
+```{r}
+#|label: export-to-excel.file
+wb=createWorkbook()
+for (l in 1:length(expression.data.list)){
+  addWorksheet(wb,names(expression.data.list)[l])
+  writeData(wb,names(expression.data.list)[l],expression.data.list[[l]])
+}
+saveWorkbook(wb,file=paste(dir.open,"OutputFiles",
+                          "FigS25-log2_expressionRatio_summary.xlsx",sep="\\"),
+                           overwrite=T)
+```
+
+```{r}
+#|label: statistics
+l=menu(names(expression.data.list),title="Select the data to analyze")
+print(names(expression.data.list)[l])
+if (l<3){
+  dunnett.ref="WT soxSA"
+}else{
+  dunnett.ref="WT dps"
+}
+statistics.df<-expression.data.list[[l]]
+strain.order<-c(
+  unique(statistics.df$Strain)[grep("WT",unique(statistics.df$Strain))],
+  unique(statistics.df$Strain)[-grep("WT",unique(statistics.df$Strain))])
+
+statistics.df$Strain<-factor(statistics.df$Strain,levels=strain.order)
+statistics.df$time<-factor(statistics.df$time,
+                           levels=sort(unique(statistics.df$time)))
+
+list.models<-vector(mode="list",length=2)
+list.models[[1]]<-lm(log2.ratio~time*Strain,data=statistics.df)
+names(list.models)[1]<-"lm"
+list.models[[2]]<-lmer(log2.ratio~time*Strain+(1|Replicate),data=statistics.df)
+names(list.models)[2]<-"lmer"
+aic_values<-sapply(list.models,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+print(names(aic_values)[min.AIC])
+preferred.model<-list.models[[min.AIC]]
+
+sim_res.expr.ratio <- simulateResiduals(fittedModel = preferred.model)
+plot(sim_res.expr.ratio)
+
+summary(preferred.model)
+
+emms.expression.ratio<-emmeans(preferred.model,~Strain|time)
+dunnett_test <- contrast(emms.expression.ratio, method = "trt.vs.ctrl",
+                         ref = dunnett.ref,adjust="dunnett")
+dunnett_test.df<-as.data.frame(summary(dunnett_test))
+print(dunnett_test)
+```
+
+#### Single point Log2.ratio
+
+```{r}
+#|label: calculate-expression-ratio
+j=1
+SPexpression.data.list<-vector(mode="list",length=4)
+for (s in xlsx.files){
+  promoter.expression.df<-
+    as.data.frame(read_excel(paste(dir.open,s,sep="\\"))
+    )
+  promoter.expression.df$FITC_FSC<-
+    promoter.expression.df$mean.FITC/promoter.expression.df$mean.FSC
+  
+  unique.stressors<-unique(gsub("no","",promoter.expression.df$Stressor))
+  for (u in unique.stressors){
+    df<-promoter.expression.df[grep(pattern=u,promoter.expression.df$Stressor),]
+    df3 <- df %>%
+      group_by(Strain,time,Replicate) %>%
+      reframe(
+        expr.ratio<-FITC_FSC[Stressor==u]/FITC_FSC[Stressor==paste0("no",u)]
+      )
+    colnames(df3)[dim(df3)[2]]<-"expr.ratio"
+    
+    df4 <- df3 %>%
+      group_by(Strain,Replicate) %>%
+      reframe(
+        log2.expr.ratio<-log2(expr.ratio[time==1]/expr.ratio[time==0])
+      )
+    colnames(df4)[dim(df4)[2]]<-"log2.expr.ratio"
+    
+    SPexpression.data.list[[j]]<-df4
+    names(SPexpression.data.list)[j]<-paste(s,u,sep="_")
+    j=j+1
+  }
+}
+```
+
+```{r}
+#|label: export-to-excel.file
+wb=createWorkbook()
+for (l in 1:length(SPexpression.data.list)){
+  addWorksheet(wb,names(SPexpression.data.list)[l])
+  writeData(wb,names(SPexpression.data.list)[l],SPexpression.data.list[[l]])
+}
+saveWorkbook(wb,file=paste(dir.open,"OutputFiles",
+                          "FigS25 - log2_SPexpressionRatio_summary.xlsx",sep="\\"),
+                           overwrite=T)
+```
+
+```{r}
+#|label: statistics
+l=menu(names(SPexpression.data.list),title="Select the data to analyze")
+print(names(SPexpression.data.list)[l])
+
+statistics.df<-SPexpression.data.list[[l]]
+statistics.df$Strain=as.factor(statistics.df$Strain)
+
+#Check any randomness based on replicates
+list.models.log2<-vector(mode="list",length=2)
+list.models.log2[[1]]<-lm(log2.expr.ratio~Strain,data=statistics.df)
+names(list.models.log2)[1]<-"lm"
+list.models.log2[[2]]<-lmer(
+  log2.expr.ratio~Strain+(1|Replicate),data=statistics.df)
+names(list.models.log2)[2]<-"lmer"
+aic_values<-sapply(list.models.log2,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+print(names(aic_values)[min.AIC])
+model.name=names(aic_values)[min.AIC]
+preferred.model.log2<-list.models.log2[[min.AIC]]
+
+#model evaluation
+sim_res.expr.ratio.log2 <- simulateResiduals(fittedModel = preferred.model.log2)
+plot(sim_res.expr.ratio.log2)
+
+if (model.name=="lm"){
+  #ANOVA model
+  anova.model<-aov(formula=log2.expr.ratio~Strain,data=statistics.df)
+  residuals.aov<-residuals(anova.model)
+  ## Normality check
+  shapiro.test(residuals.aov)
+  ## Equal.variances
+  levene_test(log2.expr.ratio~Strain,data=statistics.df)
+  ##Pairswise comparison
+  pairwise<-emmeans(anova.model,pairwise~Strain)
+  summary(pairwise$contrasts)
+}else{
+  pairwise<-emmeans(preferred.model.log2,pairwise~Strain)
+  summary(pairwise$contrasts)
+}
+```

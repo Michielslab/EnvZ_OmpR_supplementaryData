@@ -1,0 +1,162 @@
+---
+title: "FigS7_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(aomisc)
+library(QurvE)
+library(PMCMRplus)
+library(reshape2)
+library(tuple)
+library(QurvE)
+```
+
+## Specify path towards xlsx file
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on OD-data
+
+```{r}
+xlsx_OD.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S10_Data.xlsx",sep="//")))
+#Replace numbered colnames with strain designations
+colnames(xlsx_OD.df)<-gsub(" PEG6000","",colnames(xlsx_OD.df))
+new.colnames<-colnames(xlsx_OD.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_OD.df)<-new.colnames
+```
+
+```{r}
+Time<-as.numeric(c(rep("",2),xlsx_OD.df$`Time [h]`))
+Blank<-c(rep("",2),rep(0,dim(xlsx_OD.df)[1]))
+Strains<-rep("WT",dim(xlsx_OD.df)[2]-1)
+replicates<-as.numeric(sapply(colnames(xlsx_OD.df)[2:dim(xlsx_OD.df)[2]], 
+                   function(x) strsplit(x, split="_")[[1]][2]))
+
+Replicates<-rbind.data.frame(replicates)
+colnames(Replicates)<-Strains
+concentration<-as.numeric(str_match(colnames(xlsx_OD.df)[2:dim(xlsx_OD.df)[2]],"^\\d+"))
+Concentration<-rbind.data.frame(concentration)
+colnames(Concentration)<-Strains
+onlyOD.df<-xlsx_OD.df[,2:dim(xlsx_OD.df)[2]]
+colnames(onlyOD.df)<-Strains
+qurvE.df<-cbind.data.frame(Time,Blank,
+                 rbind.data.frame(Replicates,Concentration,
+                 onlyOD.df)
+)
+write.csv(qurvE.df,file=paste(dir.path,"OutputFiles","S7_qurvE_data.csv",sep="\\"))
+```
+
+### Fit the spline growth model using QurvE
+
+```{r}
+growthData<-read_data(
+  data.growth=paste(dir.path,"OutputFiles","S7_qurvE_data.csv",sep="\\"),
+                      csvsep = ",",
+                      dec=".",
+                      subtract.blank=FALSE,
+                      calib.growth = NULL,
+                      )
+growthData$time<-growthData$time[-1,]
+grofit<-growth.workflow(grodata = growthData,fit.opt='s',ec50=FALSE,
+                        suppress.messages = TRUE, export.res = FALSE,
+                        log.y.spline=T)
+plot(grofit,data.type='spline',log.y = FALSE)
+
+gcTable<-grofit$gcFit$gcTable
+gcTable.spline<-gcTable[,c(1:3,grep("spline",colnames(gcTable)))]
+dY.spline.rel<-c()
+ref.PEG<-matchAll(0,as.numeric(gcTable.spline$concentration))
+for (r in seq(1,dim(gcTable.spline)[1])){
+  rep<-as.numeric(gcTable.spline$AddId[r])
+  rep.rows<-matchAll(rep,as.numeric(gcTable.spline$AddId))
+  s<-intersect(rep,rep.rows)
+  rel.value<-as.numeric(gcTable.spline$dY.spline[r])/as.numeric(gcTable.spline$dY.spline[s])*100
+  dY.spline.rel<-c(dY.spline.rel,rel.value)
+}
+
+gcTable.spline$dY.spline.rel<-dY.spline.rel
+write.xlsx(gcTable.spline,file=paste(dir.path,"OutputFiles",
+                                     "FigS7-SplineParameters.xlsx",sep="\\"))
+```
+
+### Performing statistics on QurvE-generated output
+
+For test statistics displayed in `Fig S7`
+
+#### Reorder the factors first
+
+```{r}
+gcTable.spline$TestId<-factor(
+  gcTable.spline$TestId,
+  levels=as.character(unique(gcTable.spline$TestId)))
+```
+
+#### Draw curve on dY.rel vs. PEG concentration data
+
+```{r}
+responseToPEG.df<-gcTable.spline[,c(3,dim(gcTable.spline)[2])]
+responseToPEG.df$concentration <- as.numeric(
+  as.character(responseToPEG.df$concentration))
+
+responseToPEG.df$dY.spline.rel<-as.numeric(responseToPEG.df$dY.spline.rel)
+
+lm3.model<-lm(
+  dY.spline.rel~poly(concentration,3),data=responseToPEG.df)
+
+responseToPEG.summary<-responseToPEG.df %>%
+  group_by(concentration) %>%
+  summarize(
+    mean.dY=mean(dY.spline.rel),
+    se.dY=sd(dY.spline.rel)/sqrt(n()),
+    ci_lower=mean.dY-qt(0.975,n()-1)*se.dY,
+    ci_upper=mean.dY+qt(0.975,n()-1)*se.dY
+  )
+
+p<-ggplot()+geom_vline(xintercept=c(0,10,15),linetype="dotted",
+                       color="darkblue",linewidth=0.8)+
+  stat_smooth(data=responseToPEG.df,
+              aes(x=concentration,y=dY.spline.rel),
+              method="lm",formula=y~poly(x,3),
+              color="black",linetype="dotted")+
+  geom_point(data=responseToPEG.summary,aes(x=concentration,y=mean.dY),size=3)+
+  geom_errorbar(data=responseToPEG.summary,
+            aes(x=concentration,ymin=ci_lower,ymax=ci_upper),
+    width=0.5,linewidth=0.8)+
+  labs(x = "PEG6000 [w/v%]", y = expression(r*Delta*(OD[max] - OD[0])*" [%]"))+
+  scale_x_continuous(breaks=seq(0,15,by=3),limits=c(-0.5,15.5))+
+  scale_y_continuous(breaks=seq(0,100,by=20),limits=c(-1,110))+
+  theme_minimal()+
+    theme(panel.grid=element_blank(),
+          axis.line=element_line(color="black"),
+          axis.ticks = element_line(color="black"),
+          text=element_text(family = "Calibri",11),
+          axis.text = element_text(family = "Calibri",11),
+          axis.title=element_text(family="Calibri",12,face="bold",color="black"))
+ggsave(plot=p,filename=paste(dir.path,"OutputFiles","FigS7-WTvsPEG6000.svg",sep="\\"),
+       width=150,height=65,units="mm")
+```
+
+#### 

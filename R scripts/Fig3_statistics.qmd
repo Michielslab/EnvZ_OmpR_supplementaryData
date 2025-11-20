@@ -1,0 +1,323 @@
+---
+title: "Fig3_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(aomisc)
+library(DHARMa)
+library(PMCMRplus)
+library(reshape2)
+library(effects)
+library(extrafont)
+loadfonts(device = "win")
+library(dplyr)
+library(boot)
+library(minpack.lm)
+library(DHARMa)
+```
+
+## Specify path towards xlsx file
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on *Survival* using linear interaction models
+
+This provides the statistics of Figure 3B.
+
+### Open xlsx file and transform into data frame
+
+```{r}
+xlsx_Surv.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S8_Data.xlsx",sep="//")))
+#Replace numbered colnames with strain designations
+new.colnames<-colnames(xlsx_Surv.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_Surv.df)<-new.colnames
+Surv.model.df<-melt(xlsx_Surv.df,id.vars="Time [h]",value.name = "survival",variable.name = "Strains")
+colnames(Surv.model.df)[1]<-"time"
+
+split_strains<-
+  lapply(as.character(Surv.model.df$Strains),
+                      function(x) strsplit(x,split="_")[[1]])
+
+Surv.model.df$Strains<-sapply(split_strains, function(x) x[1])
+Surv.model.df$Replicates<-sapply(split_strains, function(x) x[2])
+```
+
+### Perform glme modeling on the data
+
+```{r}
+#|label: model-building
+Surv.model.df$time<-factor(Surv.model.df$time,
+                         levels=sort(unique(Surv.model.df$time)))
+
+WT.index<-grep("WT",unique(Surv.model.df$Strains))
+Strains.order<-c(unique(Surv.model.df$Strains)[WT.index],
+                 unique(Surv.model.df$Strains)[-WT.index])
+
+colorPalette<-c("#808080","#000000", "#A00000","#0B588F")
+
+Surv.model.df$Strains<-factor(Surv.model.df$Strains,
+                            levels=Strains.order)
+
+#Definition and evaluation of the models using AIC
+linear.models.list<-vector(mode="list",length=4)
+names(linear.models.list)<-c("lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+linear.models.list[[1]]<-lm(log10(survival)~time*Strains,data=Surv.model.df)
+linear.models.list[[2]]<-lmer(log10(survival)~time*Strains+(1|Replicates),
+                                data=Surv.model.df)
+linear.models.list[[3]]<-glm(survival~time*Strains,
+                                family=stats::Gamma(link="log"),
+                                data=Surv.model.df)
+linear.models.list[[4]]<-glmer(survival~time*Strains+(1|Replicates),
+                                family=stats::Gamma(link="log"),
+                                data=Surv.model.df)
+aic_values<-sapply(linear.models.list,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.model<-linear.models.list[[min.AIC]]
+print(names(linear.models.list)[min.AIC])
+
+p.Surv<-interactions::interact_plot(model = preferred.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=F)          # Customize line colors
+p.Surv<-p.Surv+ scale_y_continuous(trans = 'log10',
+                    breaks = c(0.00001, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100),
+                    limits=c(0.00001,100),
+                    labels=scales::label_log()) +
+    labs(y = "Survival fraction",x="Time [h]")+theme_classic()+
+  theme(legend.position="bottom",
+        text=element_text(family = "Calibri",11*10.8/8.8),
+          axis.text = element_text(family = "Calibri",11*10.8/8.8),
+          axis.title=element_text(family="Calibri",12*10.8/8.8,face="bold",color="black"))
+print(p.Surv)
+
+#DHARMa model.validation
+sim_res <- simulateResiduals(fittedModel = preferred.model)
+plot(sim_res)
+```
+
+```{r}
+#model-graphics
+p<-interactions::interact_plot(model = preferred.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=F)          # Customize line colors
+p<-p+ scale_y_continuous(trans = 'log10',
+                    breaks = c(0.00001, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100),
+                    limits=c(0.00001,100),
+                    labels=scales::label_log()) +
+    labs(y = "Survival fraction",x="Time [h]")+theme_classic()+
+  theme(legend.position="bottom",
+        text=element_text(family = "Calibri",11*10.8/8.8),
+          axis.text = element_text(family = "Calibri",11*10.8/8.8),
+          axis.title=element_text(family="Calibri",12*10.8/8.8,face="bold",color="black"))
+print(p)
+```
+
+```{r}
+#|label: post-hoc-testing
+summary(preferred.model)
+#simplified model (no time interaction, so regardless of time)
+emms<-emmeans(preferred.model,~Strains|time)
+dunnett_test <- contrast(emms, method = "trt.vs.ctrl", ref = "WT",
+                         adjust="dunnett")
+dunnett.df<-as.data.frame(summary(dunnett_test))
+print(dunnett_test)
+```
+
+## Perform statistics on *omp* expression data
+
+Script to create the `Fig 3A` (statistics).
+
+### Open xlsx file and reshape data
+
+```{r}
+#label: reformat xlsx file
+xlsx_porinExpression.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S6_Data.xlsx",sep="//")))
+new.colnames<-colnames(xlsx_porinExpression.df)
+for (c in seq(1,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    last.strain=new.colnames[c]
+  }else{
+    new.colnames[c]=last.strain
+  }
+}
+
+colnames(xlsx_porinExpression.df)<-new.colnames
+porin.expression.model.df<-data.frame(matrix(nrow=0,ncol=3))
+colnames(porin.expression.model.df)<-c("Strain","Porin","Expression")
+for (r in 2:dim(xlsx_porinExpression.df)[1]){
+  for (c in 1:dim(xlsx_porinExpression.df)[2]){
+    new.row<-rbind.data.frame(c(colnames(xlsx_porinExpression.df)[c],
+                      paste(xlsx_porinExpression.df[1,c],as.character(r-1),sep="_"),
+                      xlsx_porinExpression.df[r,c]))
+    colnames(new.row)<-colnames(porin.expression.model.df)
+    porin.expression.model.df<-rbind.data.frame(porin.expression.model.df,
+                                                new.row)
+  }
+}
+
+split_porins<-
+  lapply(as.character(porin.expression.model.df$Porin),
+                      function(x) strsplit(x,split="_")[[1]])
+
+porin.expression.model.df$Porin<-sapply(split_porins, function(x) x[1])
+porin.expression.model.df$Replicates<-sapply(split_porins, function(x) x[2])
+```
+
+```{r}
+#|label: model-building
+WT.index<-grep("WT",unique(porin.expression.model.df$Strain))
+Strains.order<-c(unique(porin.expression.model.df$Strain)[WT.index],
+                 unique(porin.expression.model.df$Strain)[-WT.index])
+porin.expression.model.df$Strain<-factor(
+  porin.expression.model.df$Strain,levels=Strains.order
+)
+
+porin.expression.model.df$Expression<-as.numeric(porin.expression.model.df$Expression)
+
+#For OmpC expression
+ompC.expression.model.df<-subset(porin.expression.model.df,
+                                 porin.expression.model.df$Porin=="ompC")
+
+linear.models.ompC.list<-vector(mode="list",length=4)
+names(linear.models.ompC.list)<-c(
+  "lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+linear.models.ompC.list[[1]]<-lm(Expression~Strain,
+                                 data=ompC.expression.model.df)
+linear.models.ompC.list[[2]]<-lmer(Expression~Strain+(1|Replicates),
+                                data=ompC.expression.model.df)
+linear.models.ompC.list[[3]]<-glm(Expression~Strain,
+                                family=stats::Gamma(link="inverse"),
+                                data=ompC.expression.model.df)
+linear.models.ompC.list[[4]]<-glmer(Expression~Strain+(1|Replicates),
+                                family=stats::Gamma(link="inverse"),
+                                data=ompC.expression.model.df)
+aic_values<-sapply(linear.models.ompC.list,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.ompC.model<-linear.models.ompC.list[[min.AIC]]
+print(names(linear.models.ompC.list)[min.AIC])
+
+#Model validation
+res.ompC<-simulateResiduals(fittedModel = preferred.ompC.model)
+plot(res.ompC)
+
+#For OmpF expression
+ompF.expression.model.df<-subset(porin.expression.model.df,
+                                 porin.expression.model.df$Porin=="ompF")
+
+linear.models.ompF.list<-vector(mode="list",length=4)
+names(linear.models.ompF.list)<-c(
+  "lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+linear.models.ompF.list[[1]]<-lm(Expression~Strain,
+                                 data=ompF.expression.model.df)
+linear.models.ompF.list[[2]]<-lmer(Expression~Strain+(1|Replicates),
+                                data=ompF.expression.model.df)
+linear.models.ompF.list[[3]]<-glm(Expression~Strain,
+                                family=stats::Gamma(link="inverse"),
+                                data=ompF.expression.model.df)
+linear.models.ompF.list[[4]]<-glmer(Expression~Strain+(1|Replicates),
+                                family=stats::Gamma(link="inverse"),
+                                data=ompF.expression.model.df)
+aic_values<-sapply(linear.models.ompF.list,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.ompF.model<-linear.models.ompF.list[[min.AIC]]
+print(names(linear.models.ompF.list)[min.AIC])
+res.ompF<-simulateResiduals(fittedModel = preferred.ompF.model)
+plot(res.ompF)
+```
+
+```{r}
+#|label: post-hoc-testing
+#For OmpC
+emms.ompC<-emmeans(preferred.ompC.model,~Strain)
+dunnett_test.ompC <- contrast(emms.ompC, method = "dunnett", ref = c("WT"))
+print(dunnett_test.ompC)
+#For OmpF
+emms.ompF<-emmeans(preferred.ompF.model,~Strain)
+dunnett_test.ompF <- contrast(emms.ompF, method = "dunnett", ref = c("WT"))
+print(dunnett_test.ompF)
+```
+
+## Perform linear regression statistics on *ompC:ompF* expression ratios
+
+```{r}
+xlsx_expressionRatio.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S9_Data.xlsx",sep="//")))
+NA_freq.df<-as.matrix(table(which(is.na(xlsx_expressionRatio.df),
+                                      arr.ind=T)[,1]))
+split.row<-as.numeric(rownames(NA_freq.df)[
+  which(NA_freq.df==dim(xlsx_expressionRatio.df)[2])])
+
+PEG.df<-xlsx_expressionRatio.df[1:split.row-1,]
+EtOH.df<-xlsx_expressionRatio.df[(split.row+1):(dim(xlsx_expressionRatio.df)[1]),]
+colnames(EtOH.df)[1]<-EtOH.df[1,1]
+EtOH.df<-na.omit(EtOH.df)
+```
+
+### Performing linear regression in a loop
+
+```{r}
+df.select<-c("PEG.df","EtOH.df")
+for (d in df.select){
+  stressor.df<-get(d)
+  new.colnames<-colnames(stressor.df)
+  for (c in seq(1,length(new.colnames))){
+    if(grepl(pattern="\\d$",new.colnames[c])==F){
+      last.strain=new.colnames[c]
+    }else{
+      new.colnames[c]=last.strain
+    }
+  }
+  colnames(stressor.df)<-new.colnames
+  colnames(stressor.df)[1]<-"stressor"
+  stressor.reg.df<-data.frame(matrix(nrow=dim(stressor.df)[1]*(dim(stressor.df)[2]-1),
+                                     ncol=3))
+  colnames(stressor.reg.df)<-c("strain","stressor","expression")
+  i=1
+  for (r in seq(1,dim(stressor.df)[1])){
+    for (c in seq(2,dim(stressor.df)[2])){
+      stressor.reg.df$strain[i]<-colnames(stressor.df)[c]
+      stressor.reg.df$stressor[i]<-stressor.df[r,1]
+      stressor.reg.df$expression[i]<-stressor.df[r,c]
+      i=i+1
+    }
+  }
+  for (s in unique(stressor.reg.df$strain)){
+    stressor.reg.strain.df<-subset(stressor.reg.df,stressor.reg.df$strain==s)
+    stressor.lm<-lm(expression~as.numeric(stressor),data = stressor.reg.strain.df)
+    assign(paste(paste(d,s,sep="_"),"lm",sep="."),summary(stressor.lm)$coefficients)
+  }
+}
+```

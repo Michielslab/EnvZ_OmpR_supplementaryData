@@ -1,0 +1,501 @@
+---
+title: "2Dplots etc. S15 Fig"
+format: html
+editor: visual
+---
+
+## Loading packages
+
+```{r}
+library(extrafont)
+windowsFonts(Calibri=windowsFont("Calibri"))
+library(ggplot2)
+library(Hmisc)
+library(MHTdiscrete)
+library(readxl)
+library(effects)
+library(reshape2)
+library(aomisc)
+library(minpack.lm)
+library(dplyr)
+library(stringr)
+library(ggpubr)
+library(grid)
+library(lme4)
+library(emmeans)
+library(DHARMa)
+library(grid)
+```
+
+## Open the desired files (one by one)
+
+```{r}
+i=1
+```
+
+```{r}
+path.csv.dir<-choose.dir()
+path=choose.files(default=path.csv.dir) #S14-S17_Data.csv
+dirOut<-paste(
+  path.csv.dir,"OutputFiles","cellular_morphology",sep="\\")
+if (i==1){
+  dir.create(dirOut)
+  i=i+1
+}
+```
+
+## Reformat files
+
+```{r}
+kinetics_dataframe.df<-read.csv(path, sep=";", header=T, na.strings=c("","NA"), dec=",")
+kinetics_RG.df<-subset(
+  kinetics_dataframe.df,kinetics_dataframe.df$FEATURE.FLUO!="NF",
+  select=c(SHAPE.area,SHAPE.circularity,FEATURE.FLUO,TIME.POINT))
+```
+
+### Prepare 2D plots
+
+```{r}
+uniqueTime<-unique(kinetics_RG.df$TIME.POINT)
+
+kinetics_RG.df2<-data.frame(
+  matrix(NA,ncol=6,nrow=2*length(uniqueTime)))
+
+colnames(kinetics_RG.df2)<-c("Time","Area","sdArea","Circularity","sdCircularity","Fluo")
+
+i=1
+for (t in seq(1,length(uniqueTime))){
+  dfSubset=subset(kinetics_RG.df,kinetics_RG.df$TIME.POINT==uniqueTime[t])
+  color.v<-c("G","R")
+  for (col in c(1,2)){
+    kinetics_RG.df2[i,1]=as.numeric(uniqueTime[t])
+    kinetics_RG.df2[i,6]=as.character(color.v[col])
+    dfSubsetColor<-subset(dfSubset,dfSubset$FEATURE.FLUO==color.v[col])
+    
+    kinetics_RG.df2[i,2]<-mean(as.numeric(dfSubsetColor$SHAPE.area))
+    kinetics_RG.df2[i,3]<-sd(as.numeric(dfSubsetColor$SHAPE.area))
+    kinetics_RG.df2[i,4]<-mean(as.numeric(dfSubsetColor$SHAPE.circularity))
+    kinetics_RG.df2[i,5]<-sd(as.numeric(dfSubsetColor$SHAPE.circularity))
+    
+    i=i+1
+  }
+}
+
+axis.v<-c("x","y")
+for (col1 in c(1,2)){
+  dfColor<-subset(kinetics_RG.df2,kinetics_RG.df2$Fluo==color.v[col1])
+  for (a in c(1,2)){
+    if (a==1){
+      c=4
+    }else{
+      c=2
+    }
+    assign(paste0(as.character(axis.v[a]),as.character(color.v[col1])),as.numeric(dfColor[,c]))
+  }
+}
+
+Gdata<-ls()[grep(pattern="^[a-z]{1}G",ls())]
+Rdata<-ls()[grep(pattern="^[a-z]{1}R",ls())]
+for (col2 in c(1,2)){
+  if (col2==1){
+    choose.v<-Gdata
+  }else{
+    choose.v<-Rdata
+  }
+ 
+  getDfx<-get(choose.v[1])
+  getDfy<-get(choose.v[2])
+  for (i in seq(1,length(getDfx)-1)){
+    df<-data.frame(getDfx[i],getDfx[i+1],getDfy[i],getDfy[i+1],as.character(color.v[col2]))
+    colnames(df)<-c("x1","x2","y1","y2","Fluo")
+    assign(paste(color.v[col2],paste0("df",as.character(i)),sep="."),df)
+  }
+}
+
+
+colorPalette<-c("#3BAA42","#FF00FF")
+
+p<-ggplot(kinetics_RG.df2,aes(x=Circularity,y=Area,colour=Fluo))+geom_point(size=2.5)+scale_color_manual(values=colorPalette)+theme_bw()+theme(legend.position = "none")
+
+p2<-p+geom_segment(lineend = 'butt',
+      aes(x=x1,y=y1,xend=x2,yend=y2,colour=Fluo),data=G.df1,
+      size=0.35,arrow = arrow(length = unit(0.035,"npc"),type="closed")
+      )+geom_curve(lineend = 'butt',
+        aes(x=x1,y=y1,xend=x2,yend=y2,colour=Fluo),data=G.df2,
+        size=0.35,arrow = arrow(length = unit(0.035,"npc"),type="closed")
+      )+geom_curve(lineend = 'butt',
+        aes(x=x1,y=y1,xend=x2,yend=y2,colour=Fluo),data=G.df3,
+        size=0.35,arrow = arrow(length = unit(0.035,"npc"),type="closed")
+      )+geom_segment(lineend = 'butt',
+        aes(x=x1,y=y1,xend=x2,yend=y2,colour=Fluo),data=G.df4,
+        size=0.35,arrow = arrow(length = unit(0.035,"npc"),type="closed")
+      )
+
+p3<-p2+geom_curve(lineend = 'butt',
+                      aes(x=x1,y=y1,xend=x2,yend=y2,colour=Fluo),data=R.df1,
+                      size=0.35,arrow = arrow(length = unit(0.035,"npc"),type="closed")
+                    )+geom_curve(lineend = 'butt',
+                      aes(x=x1,y=y1,xend=x2,yend=y2,colour=Fluo),data=R.df2,
+                      size=0.35,arrow = arrow(length = unit(0.035,"npc"),type="closed")
+                    )+geom_curve(lineend = 'butt',
+                      aes(x=x1,y=y1,xend=x2,yend=y2,colour=Fluo),data=R.df3,
+                      size=0.35,arrow = arrow(length = unit(0.035,"npc"),type="closed")
+                    )+geom_segment(lineend = 'butt',
+                      aes(x=x1,y=y1,xend=x2,yend=y2,colour=Fluo),data=R.df4,
+                      size=0.35,arrow = arrow(length = unit(0.035,"npc"),type="closed")
+                    )
+
+
+
+p4<-p3+scale_x_continuous(limits=c(0.3,0.7))+scale_y_continuous(limits=c(2.5,12.5),breaks = seq(2.5,12.5,2.5))
+p5<-p4+labs(x="Circularity",y=paste("Cell area",paste0("[","\u03bc","m²","]"),sep=" "))+theme(axis.title.x = element_text(size = 12,face = "bold",family="Calibri"),
+                                 axis.text = element_text(size = 11,family="Calibri",color = "black"),axis.title.y = element_text(size=12,face="bold",family = "Calibri",color="black"))
+```
+
+```{r}
+fileName<-strsplit(tail(strsplit(path,split="\\\\")[[1]],n=1),split="[.]")[[1]][1]
+svgFile<-paste(paste(fileName,"arrows",sep="_"),"svg",sep=".")
+
+ggsave(path = dirOut, filename = svgFile,width = 81.677, height = 89.477,units = "mm")
+```
+
+### Prepare boxplots
+
+```{r}
+choose.v<-c("area","circ")
+circArea=menu(choose.v,title = "which parameter?")
+if (circArea==1){
+  kinetics_dataframe_RG.df2<-cbind.data.frame(
+    as.character(kinetics_RG.df$TIME.POINT),
+    kinetics_RG.df$FEATURE.FLUO,kinetics_RG.df$SHAPE.area
+    )
+  
+  colnames(kinetics_dataframe_RG.df2)<-c("time","fluo","area")
+  
+  pBoxPlot<-ggplot(
+    data=kinetics_dataframe_RG.df2, 
+    aes(x=time, y=area,fill=fluo)
+    ) + geom_boxplot(lwd=0.75)
+  
+  pBoxPlot<-pBoxPlot+theme_bw()+
+    scale_y_continuous(limits = c(0, 40))+
+    scale_fill_manual(values=c("#3BAA42", "#FF00FF"))
+  
+  pBoxPlot=pBoxPlot+
+    labs(title=fileName, x="Time [h]", 
+         y=expression(paste("Cell area [", mu, "m"^2, "]")))+
+    theme(axis.text.x = element_text(family="Calibri",face="plain",size=20, angle=0), axis.text.y=element_text(family="Calibri",face="plain", size=20, angle=0), axis.title.x = element_text(family="Calibri",face="plain",size=24, angle=0), axis.title.y = element_text(family="Calibri",face="plain", size=24, angle=90))
+  
+  pBoxPlot=pBoxPlot+
+    stat_summary(fun=mean, geom="point",shape=18,size=6)+
+    theme(legend.position = "none")
+  pBoxPlot
+  }else{
+  kinetics_dataframe_RG.df2<-cbind.data.frame(
+    as.character(kinetics_RG.df$TIME.POINT),
+    kinetics_RG.df$FEATURE.FLUO,kinetics_RG.df$SHAPE.circularity)
+  
+  colnames(kinetics_dataframe_RG.df2)<-c("time","fluo","circularity")
+  
+  pBoxPlot<-ggplot(
+    data=kinetics_dataframe_RG.df2, aes(x=time, y=circularity,fill=fluo))+
+    geom_boxplot(lwd=0.75)
+  pBoxPlot<-pBoxPlot+theme_bw()+
+    scale_y_continuous(
+      limits = c(0, 1.2))+scale_fill_manual(values=c("#3BAA42", "#FF00FF"))
+  
+  pBoxPlot=pBoxPlot+labs(title=fileName, x="Time [h]", y="circularity")+
+    theme(axis.text.x = element_text(family="Calibri",face="plain",size=20, angle=0), axis.text.y=element_text(family="Calibri",face="plain", size=20, angle=0), axis.title.x = element_text(family="Calibri",face="plain",size=24, angle=0), axis.title.y = element_text(family="Calibri",face="plain", size=24, angle=90))
+  pBoxPlot=pBoxPlot+
+    stat_summary(fun=mean, geom="point",shape=18,size=6)+
+    theme(legend.position = "none")
+  pBoxPlot
+  }
+```
+
+```{r}
+fileNameSvg<-paste(paste(fileName,choose.v[circArea],sep="_"),"svg",sep=".")
+ggsave(pBoxPlot,device="svg",file = paste(dirOut,fileNameSvg,sep="/"))
+```
+
+### Boxplot statistics
+
+```{r}
+#normality-test
+timeV<-c(0,2,4,6,8)
+shapiro.table<-data.frame(matrix(1, nrow=length(timeV), ncol=3))
+colnames(shapiro.table)<-c('time','p-value G','p-value R')
+FLUO<-c("G","R")
+for (f in c(1,2)){
+  assign(paste(as.character(FLUO[f]),"df",sep="."),subset(kinetics_dataframe_RG.df2,kinetics_dataframe_RG.df2$fluo==FLUO[f])[,c(1,3)])
+}
+
+r=1
+for (t in timeV){
+  G_T<-subset(G.df, G.df$time==t)
+  R_T<-subset(R.df, R.df$time==t)
+  shapiro.table[r,1]=t
+  shapiro.table[r,2]<-as.numeric(shapiro.test(G_T[,2])$p.value)
+  shapiro.table[r,3]<-as.numeric(shapiro.test(R_T[,2])$p.value)
+  r=r+1
+}
+```
+
+```{r}
+statistics.table<-data.frame(matrix(1, nrow=length(timeV), ncol=8))
+colnames(statistics.table)<-c('time', 'test','p-value','p-adjust','meanG','meanR',"count.G","count.R")
+
+r=1
+for (t in timeV){
+  G_T<-subset(G.df, G.df$time==t)
+  R_T<-subset(R.df, R.df$time==t)
+  statistics.table[r,1]=t
+  statistics.table[r,5]=mean(as.numeric(G_T[,2]))
+  statistics.table[r,7]=dim(G_T)[1]
+  statistics.table[r,6]=mean(as.numeric(R_T[,2]))
+  statistics.table[r,8]=dim(R_T)[1]
+  if (shapiro.table$`p-value G`[r]>=0.05 && shapiro.table$`p-value R`[r]>=0.05){
+    varP<-var.test(as.numeric(G_T[,2]),as.numeric(R_T[,2]))$p.value
+    if (varP>=0.05){
+      statistics.table[r,2]="t-test equal var"
+      statistics.table[r,3]=t.test(as.numeric(G_T[,2]),as.numeric(R_T[,2]),var.equal = TRUE)$p.value
+    }else{
+      statistics.table[r,2]="t-test unequal var"
+      statistics.table[r,3]=t.test(as.numeric(G_T[,2]),as.numeric(R_T[,2]),var.equal = FALSE)$p.value
+    }
+  }else{
+    statistics.table[r,2]="wilcoxon"
+    statistics.table[r,3]=wilcox.test(as.numeric(G_T[,2]),as.numeric(R_T[,2]))$p.value
+  }
+  r=r+1
+}
+statistics.table$`p-adjust`<-p.adjust(statistics.table$`p-value`,method='holm')
+
+write.xlsx(statistics.table,file=paste(dirOut,paste(paste(fileName,as.character(choose.v[circArea]),sep="_"),"xlsx",sep="."),sep="/"),rowNames=F)
+
+```
+
+## Survival statistics
+
+#### Open and process .xlsx file
+
+```{r}
+Survival.df<-as.data.frame(read_excel(
+  path=paste(path.csv.dir,"S13_Data.xlsx",sep="//")))
+
+Survival.df<-Survival.df[rowSums(is.na(Survival.df))!=ncol(Survival.df),]
+
+col.COMBO<-c(grep("^COMBO",Survival.df[,1]),dim(Survival.df)[1])
+COMBO.names<-as.character(na.omit(gsub(" ","",Survival.df[col.COMBO,1])))
+for (c in 1:length(COMBO.names)){
+  if (c<length(COMBO.names)){
+    split.df<-Survival.df[col.COMBO[c]:(col.COMBO[c+1]-1),]
+  }else{
+    split.df<-Survival.df[col.COMBO[c]:(col.COMBO[c+1]),]
+  }
+  colnames(split.df)<-split.df[1,]
+  split.df<-split.df[-1,]
+  split.df<-split.df[,-1]
+  new.colnames<-colnames(split.df)
+  index=1
+  for (i in seq(2,length(new.colnames))){
+    if(grepl(pattern="NA",new.colnames[i])==F){
+      last.strain=new.colnames[i]
+      index=1
+    }else{
+      index=index+1
+      new.colnames[i]=paste(last.strain,as.character(index),sep="_")
+    }
+  }
+  colnames(split.df)<-new.colnames
+  split.model.df<-melt(split.df,id.vars="Time [h]",value.name = "survival",
+                       variable.name = "Strains")
+  split.model.df$id<-sapply(as.character(split.model.df$Strains),
+                            function(x) strsplit(x,split="_")[[1]][2])
+  split.model.df$id[which(is.na(split.model.df$id))]<-"1"
+  split.model.df$Strains<-gsub("_\\d","",split.model.df$Strains)
+  colnames(split.model.df)[1]<-"Time"
+  split.model.df$survival<-as.numeric(split.model.df$survival)
+  split.model.df$Time<-as.numeric(split.model.df$Time)
+  assign(paste(COMBO.names[c],"df",sep="."),split.model.df)
+}
+```
+
+```{r}
+#|label: model-building-in-loop
+for (j in seq(2,4)){
+  COMBO.glm.data<-get(paste(paste0("COMBO",as.character(j)),"df",sep="."))
+  COMBO.glm.data$Time<-factor(COMBO.glm.data$Time,
+                              levels=sort(unique(COMBO.glm.data$Time)))
+  models.list<-vector(length=4,mode="list")
+  names(models.list)<-c("lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+  models.list[[1]]<-lm(formula=log10(survival)~Strains*Time,
+                 data=COMBO.glm.data)
+  models.list[[2]]<-lmer(formula=log10(survival)~Strains*Time+(1|id),
+                 data=COMBO.glm.data)
+  models.list[[3]]<-glm(formula=survival~Strains*Time,
+                 data=COMBO.glm.data,
+                 family=stats::Gamma(link="log"))
+  models.list[[4]]<-glmer(formula=survival~Strains*Time+(1|id),
+                      data=COMBO.glm.data,
+                      family=stats::Gamma(link="log"))
+  models.list<-models.list[!sapply(models.list,is.null)]
+  aic_values<-sapply(models.list,AIC)
+  min.AIC<-which(aic_values==min(aic_values))
+  preferred.model<-models.list[[min.AIC]]
+  print(names(models.list)[min.AIC])
+  
+  p<-interactions::interact_plot(model = preferred.model,
+              pred = Time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = c("black","grey"),
+              vary.lty=F)          # Customize line colors
+  assign(paste(paste0("COMBO",as.character(j)),"plot",sep="."),p)
+  sim_res <- simulateResiduals(fittedModel = preferred.model)
+  assign(paste(paste0("COMBO",as.character(j)),"DHARMa",sep="."),sim_res)
+  assign(paste(paste0("COMBO",as.character(j)),"stat",sep="."),
+         summary(preferred.model))
+  reference=unique(COMBO.glm.data$Strains)[1]
+  ems<-emmeans(preferred.model,~Strains|Time)
+  dunnett_test<-contrast(ems,method="trt.vs.ctrl",ref=reference)
+  assign(paste(paste0("COMBO",as.character(j)),"dunnett",sep="."),
+         summary(dunnett_test))
+}
+```
+
+```{r}
+#|label: show-model-predictors-and-evaluation
+#COMBO2
+print(COMBO2.plot)
+plot(COMBO2.DHARMa)
+print(COMBO2.stat)
+as.data.frame(COMBO2.dunnett)
+
+#COMBO3
+print(COMBO3.plot)
+plot(COMBO3.DHARMa)
+print(COMBO3.stat)
+as.data.frame(COMBO3.dunnett)
+
+#COMBO4
+print(COMBO4.plot)
+plot(COMBO4.DHARMa)
+print(COMBO4.stat)
+as.data.frame(COMBO4.dunnett)
+```
+
+## Create compositional barplots
+
+S16_Fig
+
+```{r}
+#|label: combine-all-COMBO-data
+COMBO.csv.files <- list.files(
+  path = paste(path.csv.dir, collapse="\\"),
+  pattern = "^S1[4-7]_Data\\.csv$",
+  full.names = TRUE
+)
+columns.select<-c("IMAGE","REPLICATE","FEATURE","TIME.POINT")
+#File that contains the population composition for each COMBO
+COMBO.composition<-read_excel(path=paste(path.csv.dir,"S5_Table.xlsx",sep="//"))
+i=1
+for (c in COMBO.csv.files){
+  COMBO.open<-read.csv(file=c,sep=";",dec=",")
+  COMBO.open<-COMBO.open[,grep(pattern=paste(columns.select,collapse="|"),
+                                 colnames(COMBO.open))]
+  if (i==1){
+    COMBO.open<-COMBO.open[-c(grep(pattern=paste0("^","","$"),
+                                   COMBO.open$IMAGE)),]
+    COMBO.summary.df<-COMBO.open
+  }else{
+    COMBO.open<-COMBO.open[-c(grep(pattern=paste0("^","","$"),
+                                   COMBO.open$IMAGE)),]
+    COMBO.summary.df<-rbind.data.frame(COMBO.summary.df,COMBO.open)
+  }
+  i=i+1
+}
+
+COMBO.summary.df$FEATURE.FLUO<-gsub('"','',COMBO.summary.df$FEATURE.FLUO)
+replicate<-vector(mode="numeric",length=dim(COMBO.summary.df)[1])
+COMBO<-vector(mode="numeric",length=dim(COMBO.summary.df)[1])
+for (r in 1:dim(COMBO.summary.df)[1]){
+  rep<-gsub("[()]","",
+    str_extract(pattern="\\(\\d\\)",COMBO.summary.df$IMAGE[r])
+  )
+  replicate[r]<-as.numeric(rep)
+  combo<-str_extract(pattern="\\d$",
+    str_extract(pattern="COMBO\\d",COMBO.summary.df$IMAGE[r]))
+  COMBO[r]<-as.numeric(combo)
+}
+
+COMBO.summary.df$replicate<-replicate
+COMBO.summary.df$COMBO<-COMBO
+```
+
+```{r}
+#|label: calculate-statistics
+COMBO.summary.stats<-COMBO.summary.df %>%
+  group_by(TIME.POINT,COMBO,replicate,FEATURE.FLUO) %>%
+  summarise(
+    cells.count=n(),
+    .groups = "drop_last"
+  ) %>%
+  mutate(
+    total.count=sum(cells.count),
+    percentage.abundance=(cells.count/total.count)*100
+  ) %>%
+  ungroup()
+
+COMBO.summary.stats$FEATURE.FLUO<-factor(
+  COMBO.summary.stats$FEATURE.FLUO,levels=c("G","R","NF")
+)
+```
+
+```{r}
+for (c in unique(COMBO.summary.stats$COMBO)){
+  COMBO.subset<-subset(COMBO.summary.stats,COMBO.summary.stats$COMBO==c)
+  if (unique(COMBO.subset$COMBO)==1){
+    fill.colors<-c("#3BAA42","#808080")
+  }else{
+    fill.colors<-c("#3BAA42", "#FF00FF","#808080")
+  }
+  ggTitle<-paste(
+    COMBO.composition[match(paste("COMBO",as.character(c)),
+                            COMBO.composition$Combo),1],
+    COMBO.composition[match(paste("COMBO",as.character(c)),
+                            COMBO.composition$Combo),2],sep=" - ")
+  p.perc<-ggbarplot(data=COMBO.subset,
+                    "TIME.POINT","percentage.abundance",
+                    fill="FEATURE.FLUO",add="mean_range",
+                    xlab="Time [h]",ylab="Population %")+
+    scale_fill_manual(values=fill.colors)+
+      theme(legend.position="none")+
+    scale_y_continuous(breaks=seq(0,100,25),limits=c(-10,125))+
+    ggtitle(ggTitle)+
+    theme(text=element_text(family = "Calibri",12),
+          axis.text = element_text(family = "Calibri",11),
+          plot.title=element_text(family = "Calibri",8))
+  assign(paste0("p",paste0("COMBO",as.character(unique(COMBO.subset$COMBO)))),
+         p.perc)
+}
+
+p.COMBO.panel<-ggarrange(pCOMBO1+rremove("xlab")+rremove("x.axis")+
+                           rremove("x.text")+rremove("x.ticks")+
+                           rremove("ylab"),
+                         pCOMBO2+rremove("xlab")+rremove("x.axis")+
+                           rremove("x.text")+rremove("x.ticks")+
+                           rremove("ylab"),
+                         pCOMBO3+rremove("xlab")+rremove("x.axis")+
+                           rremove("x.text")+rremove("x.ticks")+
+                           rremove("ylab"),
+                         pCOMBO4+rremove("ylab"),nrow=4,ncol=1)
+p.COMBO.panel.annotated<-annotate_figure(p.COMBO.panel,left=textGrob("Population (%)",rot=90,
+                vjust=1,gp=gpar(cex=1.3,fontfamily="Calibri")))
+
+ggsave(plot=p.COMBO.panel.annotated,
+       filename=paste(dirOut,"FigS11-population.panel.svg" , sep="\\"),
+       width=190,height=250,units="mm")
+```

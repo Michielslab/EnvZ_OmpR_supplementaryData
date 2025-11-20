@@ -1,0 +1,193 @@
+---
+title: "QurvE_EC50_analyzer"
+author: "Thomas Schalck"
+format: html
+editor: visual
+---
+
+## Required packages
+
+```{r}
+library(QurvE)
+library(lme4)
+library(stringi)
+library(openxlsx)
+library(DHARMa)
+library(emmeans)
+library(dplyr)
+```
+
+## QurvE analysis
+
+#### Open .csv files for analysis
+
+```{r}
+#|label: open-qurvE-files
+dir.open<-choose.dir()
+qurvE.files<-list.files(pattern="_qurvE\\.csv",dir.open)
+#Check which ROS species has being used
+ROS<-c("PQ","H2O2")
+ROS.ask<-c()
+PQ.present<-sapply(qurvE.files,function(x) grepl(ROS[1],x))
+if (length(unique(PQ.present))>1){
+  ROS.ask<-c(ROS.ask,ROS[1])
+}else{
+  if (unique(PQ.present)!=F){
+    ROS.ask<-c(ROS.ask,ROS[1])
+  }
+}
+H2O2.present<-sapply(qurvE.files,function(x) grepl(ROS[2],x))
+if (length(unique(H2O2.present))>1){
+  ROS.ask<-c(ROS.ask,ROS[2])
+}else{
+  if (unique(H2O2.present)!=F){
+    ROS.ask<-c(ROS.ask,ROS[2])
+  }
+}
+```
+
+```{r}
+#|label: ask-ROS-species
+ROS.to.analyze<-menu(ROS.ask,title="Please pick a ROS species:  ")
+qurvE.files.to.analyze<-grep(pattern=ROS.ask[ROS.to.analyze],qurvE.files,
+                             value=T)
+```
+
+For the QurvE settings we used the **log.transformed** OD data to extract the growth parameters using the **spline** model. For the EC50 calculation, we used the growth rate (`mu.spline`) as the response. This is the `default` setting for QurvE we used to create the **graphs** and **statistics**. *However, you can change the parameters (we did this and the outcome is not different from the default setting). We opted for the log-transformed data and mu response since these settings provide the most robust output in general.*
+
+```{r}
+#|label: qurvE-model-builder
+f=1
+next.dataset<-menu(c("yes","no"),title="Next dataset?")
+dr.Table.full<-data.frame(matrix(nrow=0,ncol=7))
+colnames(dr.Table.full)<-c("Test","EC50.Estimate","EC50.Lower","EC50.Upper" ,"test",
+                           "model","Date.ID")
+grofit.settings<-menu(c("default","flexible"),title="Which parameters to choose?")
+if (grofit.settings==1){
+  dr.p<-"mu.spline"
+  logY=TRUE
+}else{
+  dr.p.choose<-menu(c("mu.spline","lambda.spline"),title="Pick your parameter:")
+  dr.p<-c("mu.spline","lambda.spline")[dr.p.choose]
+  logY.choose<-menu(c("TRUE","FALSE"),title="Pick your parameter:")
+  logY=c(TRUE,FALSE)[logY.choose]
+}
+
+while (f<length(qurvE.files.to.analyze)+1 && next.dataset==1){
+  date.ID<-strsplit(qurvE.files.to.analyze[f],split="_")[[1]][1]
+  growthData<-read_data(data.growth=paste(
+                      dir.open,qurvE.files.to.analyze[f],sep="\\"),
+                      csvsep = ",",
+                      dec=".",
+                      subtract.blank=FALSE,
+                      calib.growth = NULL
+                      )
+  grofit<-growth.workflow(grodata = growthData,fit.opt='s',ec50=TRUE,
+                          dr.method="model",dr.parameter=dr.p,
+                        suppress.messages = TRUE, export.res = FALSE,
+                        log.y.spline=logY)
+  plot(grofit$drFit,cex.point=1,basesize = 12)
+  dr.Table<-as.data.frame(grofit$drFit$drTable)
+  dr.Table<-subset(dr.Table,select=c(Test,EC50.Estimate,EC50.Lower,
+                                     EC50.Upper,test,model))
+  dr.Table$Date.ID<-rep(date.ID,dim(dr.Table)[1])
+  dr.Table.full<-rbind.data.frame(dr.Table.full,dr.Table)
+  next.dataset<-menu(c("yes","no"),title="Next dataset?")
+  f=f+1
+}
+
+openxlsx::write.xlsx(dr.Table.full,file=paste(
+  dir.open,"OutputFiles",
+  paste("S25",paste(ROS.ask[ROS.to.analyze],"summary",sep="_"),"xlsx",sep="."),sep="\\"),
+    rowNames=F)
+```
+
+```{r}
+WT.index<-grep("WT",unique(dr.Table.full$Test))
+envZ.index<-grep("envZ",unique(dr.Table.full$Test))
+Strains.order<-c(unique(dr.Table.full$Test)[WT.index],
+                 unique(dr.Table.full$Test)[envZ.index],
+                 unique(dr.Table.full$Test)[-c(WT.index,envZ.index)])
+dr.Table.full$Test<-factor(dr.Table.full$Test,
+                           levels=Strains.order)
+
+EC50.models.list<-vector(mode="list",length=4)
+names(EC50.models.list)<-c(
+  "lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+EC50.models.list[[1]]<-lm(EC50.Estimate~Test,data=dr.Table.full)
+EC50.models.list[[2]]<-lmer(EC50.Estimate~Test+(1|Date.ID),
+                            data=dr.Table.full)
+EC50.models.list[[3]]<-glm(EC50.Estimate~Test,
+                            family=stats::Gamma(link="identity"),
+                            data=dr.Table.full)
+EC50.models.list[[4]]<-glmer(EC50.Estimate~Test+(1|Date.ID),
+                            family=stats::Gamma(link="identity"),
+                            data=dr.Table.full)
+
+aic_values<-sapply(EC50.models.list,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.EC50.model<-EC50.models.list[[min.AIC]]
+print(names(EC50.models.list)[min.AIC])
+
+#model evaluation
+sim_res.EC50 <- simulateResiduals(fittedModel = preferred.EC50.model)
+plot(sim_res.EC50)
+```
+
+```{r}
+#|label: post-hoc-testing
+emms.EC50<-emmeans(preferred.EC50.model,~Test)
+reference=grep("WT",unique(dr.Table.full$Test),value=T)
+dunnett_test.EC50 <- contrast(emms.EC50, method = "dunnett", ref = reference)
+dunnett.EC50.df<-as.data.frame(summary(dunnett_test.EC50))
+print(dunnett_test.EC50)
+```
+
+```{r}
+#|label: statistics-on-dr.Table.full
+EC50.statistics<-dr.Table.full %>%
+  group_by(Test) %>%
+  summarize(
+    mean.EC50=mean(EC50.Estimate),
+    se.EC50=sd(EC50.Estimate)/sqrt(n()),
+    ci_lower=mean.EC50-qt(0.975,n()-1)*se.EC50,
+    ci_upper=mean.EC50+qt(0.975,n()-1)*se.EC50,
+    .groups="drop"
+  )
+
+EC50.statistics$Test<-factor(EC50.statistics$Test,levels=Strains.order)
+```
+
+```{r}
+#|label: plot-EC50.values
+OkabeIto.colors<-palette.colors(n=length(unique(dr.Table.full$Date.ID)))
+names(OkabeIto.colors)<-unique(dr.Table.full$Date.ID)
+max.y=ceiling(max(EC50.statistics$ci_upper))
+min.y=floor(min(EC50.statistics$ci_lower))
+p.EC50<-ggplot()+
+  geom_errorbar(data=EC50.statistics,
+            aes(x=Test,ymin=ci_lower,ymax=ci_upper),color="black",
+    width=0.4,linewidth=0.6)+
+  geom_segment(data=EC50.statistics,
+               aes(x=as.numeric(Test)-0.1,
+                   xend=as.numeric(Test)+0.1,
+                   y=mean.EC50,
+                   yend=mean.EC50),
+               linewidth=0.6,color="black")+
+  geom_point(data=dr.Table.full, aes(x=Test, y=EC50.Estimate, 
+                        fill=factor(Date.ID)),shape=21, size = 2.5)+
+  scale_fill_manual(values=OkabeIto.colors)+theme_classic()+
+  labs(y =expression(EC[50]~" [mM]"), fill = "Date.ID")+
+  scale_y_continuous(breaks=seq(0,max.y,by=1),limits=c(min.y,max.y))+
+  theme(text=element_text(family = "Calibri",13),
+        axis.title.x = element_blank(),
+          axis.text = element_text(family = "Calibri",13),
+          axis.title=element_text(family="Calibri",14,face="bold",color="black"),
+        legend.position="none")
+
+fileName<-readline(prompt="Please provide a filename")
+ggsave(p.EC50,file=paste(dir.open,"OutputFiles",
+                         paste("S25",paste(fileName,ROS.ask[ROS.to.analyze],
+                                              sep="_"),"svg",sep="."),sep="\\"),
+       width=210/3,height=45,units="mm")
+```

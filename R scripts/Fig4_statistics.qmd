@@ -1,0 +1,548 @@
+---
+title: "Fig4_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(aomisc)
+library(QurvE)
+library(lme4)
+library(DHARMa)
+library(effects)
+library(QurvE)
+library(reshape2)
+library(ggplot2)
+library(ggpubr)
+library(extrafont)
+loadfonts(device = "win")
+library(ggpubr)
+library(stringr)
+library(emmeans)
+```
+
+## Specify path towards xlsx file
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on *OD-data*
+
+Statistics related to `Figure 4 A & B`
+
+### Open xlsx file and reshape data into QurvE compatible format
+
+```{r}
+xlsx_OD.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S11_Data.xlsx",sep="//")))
+xlsx_OD.mod.df<-xlsx_OD.df
+new.colnames<-colnames(xlsx_OD.df)
+new.colnames.mod<-colnames(xlsx_OD.df)
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    i=1
+    last.strain=new.colnames[c]
+    new.colnames.mod[c]=paste(new.colnames.mod[c],i,sep="_")
+  }else{
+    i=i+1
+    new.colnames[c]=last.strain
+    new.colnames.mod[c]=paste(last.strain,i,sep="_")
+  }
+}
+colnames(xlsx_OD.df)<-new.colnames
+colnames(xlsx_OD.mod.df)<-new.colnames.mod
+```
+
+```{r}
+Time<-as.numeric(c(rep("",2),xlsx_OD.mod.df$`Time [h]`))
+Blank<-c(rep("",2),rep(0,dim(xlsx_OD.df)[1]))
+Strains.v<-tail(unique(colnames(xlsx_OD.df)),n=-1)
+Replicates<-vector(mode="numeric",length=dim(xlsx_OD.df)[2]-1)
+for (s in Strains.v){
+  position<-grep(pattern=paste0("^",s,"$"),colnames(xlsx_OD.df))-1
+  for (p in position){
+    Replicates[p]<-which(position==p)
+  }
+}
+Replicates<-rbind.data.frame(Replicates)
+colnames(Replicates)<-tail(colnames(xlsx_OD.df),n=-1)
+Concentration<-rbind.data.frame(rep(0,dim(Replicates)[2]))
+colnames(Concentration)<-tail(colnames(xlsx_OD.df),n=-1)
+onlyOD.df<-xlsx_OD.df[,2:dim(xlsx_OD.df)[2]]
+colnames(onlyOD.df)<-colnames(Concentration)
+qurvE.df<-cbind.data.frame(Time,Blank,
+                 rbind.data.frame(Replicates,Concentration,
+                 onlyOD.df)
+)
+write.csv(qurvE.df,
+          file=paste(dir.path,"OutputFiles","qurvE_fig4.csv",sep="\\"))
+```
+
+### Fit the spline growth model using QurvE
+
+```{r}
+growthData<-read_data(data.growth=paste(
+  dir.path,"OutputFiles", "qurvE_fig4.csv",sep="\\"),
+                      csvsep = ",",
+                      dec=".",
+                      subtract.blank=FALSE,
+                      calib.growth = NULL
+                      )
+growthData$time<-growthData$time[-1,]
+grofit<-growth.workflow(grodata = growthData,fit.opt='s',ec50=FALSE,
+                        log.y.spline = T,
+                        suppress.messages = TRUE, export.res = FALSE)
+plot(grofit,data.type='spline',log.y = FALSE)
+
+gcTable<-grofit$gcFit$gcTable
+gcTable.spline<-gcTable[,c(1:3,grep("spline",colnames(gcTable)))]
+write.xlsx(gcTable.spline,file=paste(dir.path,"OutputFiles",
+                                     "Fig4-SplineParameters.xlsx",sep="\\"))
+```
+
+### Performing statistics on QurvE-generated output
+
+#### Reorder the factors first
+
+```{r}
+gcTable.spline$TestId<-factor(
+  gcTable.spline$TestId,levels=as.character(unique(gcTable.spline$TestId)))
+gcTable.spline$mu.spline<-as.numeric(gcTable.spline$mu.spline)
+```
+
+#### Separate WT from envZ\* data
+
+```{r}
+gcTable.envZ.spline<-gcTable.spline[grep(pattern="envZ",gcTable.spline$TestId),]
+gcTable.WT.spline<-gcTable.spline[-grep(pattern="envZ",gcTable.spline$TestId),]
+```
+
+#### mu (growth rate) statistics
+
+For `WT` as reference:
+
+```{r}
+#|label: WT-statistics
+#Check normality
+shapiro.WT<-vector(mode="list",length=length(unique(gcTable.WT.spline$TestId)))
+i=1
+for (s in unique(gcTable.WT.spline$TestId)){
+  shapiro.WT[[i]]<-shapiro.test(
+    subset(gcTable.WT.spline,gcTable.WT.spline$TestId==s)[,5])$p.value
+  names(shapiro.WT)[i]=s
+  i=i+1
+}
+  ##normality = OK
+#Check homoscedasticity
+levene.mu.WT.test<-LeveneTest(mu.spline~TestId,gcTable.WT.spline)
+print(levene.mu.WT.test)
+  ##variances are equal
+#Perform 1-way ANOVA
+res.mu.WT.aov<-aov(as.numeric(mu.spline)~TestId,data=gcTable.WT.spline) #1-way ANOVA
+summary(res.mu.WT.aov) #Strains significantly explain the variance in mu
+Dunnet.mu.WT.df<-as.data.frame(DunnettTest(
+  x=as.numeric(gcTable.WT.spline$mu.spline),
+            g=gcTable.WT.spline$TestId)$`"WT"`)
+write.xlsx(x=Dunnet.mu.WT.df,file=paste(
+  dir.path,"OutputFiles",
+  "Fig4_growthRate_WT_dunnett.xlsx",sep="\\"),rowNames=T)
+```
+
+For `envZ*` as reference:
+
+```{r}
+#|label: envZ-statistics
+#Check normality
+shapiro.envZ<-vector(mode="list",length=length(unique(gcTable.envZ.spline$TestId)))
+i=1
+for (s in unique(gcTable.envZ.spline$TestId)){
+  shapiro.envZ[[i]]<-shapiro.test(
+    subset(gcTable.envZ.spline,gcTable.envZ.spline$TestId==s)[,5])$p.value
+  names(shapiro.envZ)[i]=s
+  i=i+1
+}
+ ##normality = OK
+
+#Check homoscedasticity
+levene.mu.envZ.test<-LeveneTest(as.numeric(mu.spline)~TestId,gcTable.envZ.spline)
+print(levene.mu.envZ.test)
+  ##variances are equal
+#1-way ANOVA
+res.mu.envZ.aov<-aov(as.numeric(mu.spline)~TestId,data=gcTable.envZ.spline)
+summary(res.mu.envZ.aov)
+  ##Strains significantly explain the variance in mu
+Dunnet.mu.envZ.df<-as.data.frame(DunnettTest(
+  x=as.numeric(gcTable.envZ.spline$mu.spline),
+            g=gcTable.envZ.spline$TestId)$`"envZ*L116P"`)
+write.xlsx(x=Dunnet.mu.envZ.df,file=paste(
+  dir.path,"OutputFiles",
+  "Fig4_growthRate_envZ_dunnett.xlsx",sep="\\"),rowNames=T)
+```
+
+### Plotting raw OD595 data for WT and envZ\* backgrounds seperately
+
+For supplementary data
+
+```{r}
+xlsx_OD_plot.df<-melt(
+  xlsx_OD.mod.df,id.vars="Time [h]",value.name = "OD",
+  variable.name = "Strains")
+xlsx_OD_plot.df$Strains<-gsub(pattern="_\\d","",xlsx_OD_plot.df$Strains)
+colnames(xlsx_OD_plot.df)[1]<-"time"
+xlsx_OD.stat.df<-xlsx_OD_plot.df %>%
+  group_by(time,Strains) %>%
+  summarise(
+    mean_OD=mean(OD),
+    se_OD=sd(OD)/sqrt(n()),
+    lower_ci=mean_OD-qt(0.975,n()-1)*se_OD,
+    upper_ci=mean_OD+qt(0.975,n()-1)*se_OD,
+    .groups="drop"
+  )
+```
+
+```{r}
+spline.interpolation<-
+  xlsx_OD.stat.df %>%
+  group_by(Strains) %>%
+  do({
+    spline_result<-as.data.frame(spline(.$time,.$mean_OD))
+    spline_result$Strains<-unique(.$Strains)
+    spline_result
+  })
+```
+
+```{r}
+keywords<-c("OD.stat","interpolation")
+data.select<-sort(grep(paste(keywords,collapse="|"),ls(),value=T),decreasing=T)
+strain.bckgrds<-c("WT","envZ")
+for (d in seq(1,length(keywords))){
+  df<-get(data.select[d])
+  separate.envZ<-df[grep(pattern="^envZ",df$Strains),]
+  pattern.envZ<-c("^envZ\\*L116P$","^envZ\\*L116P\\s{1}.{1}ompC",
+                  "^envZ\\*L116P\\s{1}.{1}ompF")
+  replacements<-c(
+    "(-)", "ompC","ompF"
+  )
+  for (i in seq_along(pattern.envZ)){
+    separate.envZ$Strains <- str_replace_all(
+      separate.envZ$Strains, 
+      pattern.envZ[i], replacements[i])
+  }
+  assign(paste(keywords[d],"envZ",sep="."),separate.envZ)
+  
+  separate.WT<-df[-c(grep(pattern="^envZ",df$Strains)),]
+  pattern.WT=c("^WT$","^.{1}ompC","^.{1}ompF")
+  for (k in seq_along(pattern.WT)){
+    separate.WT$Strains <- str_replace_all(
+      separate.WT$Strains, 
+      pattern.WT[k], replacements[k])
+  }
+  
+  assign(paste(keywords[d],"WT",sep="."),separate.WT)
+}
+```
+
+```{r}
+keywords.plot<-c("^OD.stat","^interpolation")
+data.plot<-grep(paste(keywords.plot,collapse="|"),ls(),value=T)
+for (b in strain.bckgrds){
+  if (b=="WT"){
+    line.type="solid"
+    shape.symbol=21
+  }else{
+    line.type="dotted"
+    shape.symbol=23
+  }
+  interpolation.df<-get(
+    grep(paste(keywords.plot[2],b,sep="."),data.plot,value = T))
+  interpolation.df$Strains<-factor(interpolation.df$Strains,
+                                   levels=replacements)
+  
+  OD.stat.df<-get(
+    grep(paste(keywords.plot[1],b,sep="."),data.plot,value = T))
+  OD.stat.df$Strains<-factor(OD.stat.df$Strains,
+                             levels=replacements)
+  pOD<-ggplot()+
+    geom_line(data=interpolation.df,aes(x=x,y=y,color=factor(Strains)),
+              linetype=line.type,linewidth=1,alpha=0.75)+
+    geom_errorbar(data=OD.stat.df,
+                  aes(x=time,ymin=lower_ci,ymax=upper_ci,
+                color=factor(Strains)),
+                width=0.5,linewidth=0.5)+
+    geom_point(data=OD.stat.df,aes(x=time,y=mean_OD,fill=factor(Strains)),
+               shape=shape.symbol,size=3)+
+    labs(
+    x = "Time [h]", y = expression(OD[595]),
+    color = "Strains", fill = "Strains")+
+  scale_x_continuous(breaks=seq(0,12,by=2),limits=c(-0.5,12.5))+
+  scale_y_continuous(breaks=seq(0,0.3,by=0.05),limits=c(-0.01,0.35))+
+  theme_minimal()+
+    theme(panel.grid=element_blank(),
+          axis.line=element_line(color="black"),
+          axis.ticks = element_line(color="black"),
+          text=element_text(family = "Calibri",13),
+          axis.text = element_text(family = "Calibri",13),
+          axis.title=element_text(
+            family="Calibri",15,face="bold",color="black"),
+          legend.position = "bottom",
+          plot.margin = margin(5,10,5,10))+
+    scale_color_manual(
+      values=c("#9B9B9B", "#FFC207","#760187"))+
+    scale_fill_manual(
+      values=c("#9B9B9B", "#FFC207","#760187")
+    )
+  ggsave(plot=pOD,filename=paste(dir.path,"OutputFiles",
+      paste0("FigS9-",paste(paste(b,"plot",sep="_"),"svg",sep=".")),
+      sep="\\"))
+  assign(paste(b,"plot",sep="."),pOD)
+}
+```
+
+```{r}
+theme_set(theme_grey(base_family = "Calibri"))
+plot.list<-vector(mode="list",2)
+OD.panel.plot<-ggarrange(WT.plot,
+                         envZ.plot+
+                           rremove("ylab"),
+                         nrow=1,ncol=2,
+                         legend="bottom")
+ggsave(plot=OD.panel.plot,filename=paste(dir.path,"OutputFiles",
+                  "FigS9-OD_panel_plot.svg",sep="\\"),
+                  width=195,height=80,units="mm")
+```
+
+## Perform statistics on survival-data
+
+#### Reformat xlsx data
+
+```{r}
+xlsx_Surv.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S12_Data.xlsx",sep="//")))
+#Replace numbered colnames with strain designations
+new.colnames<-colnames(xlsx_Surv.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_Surv.df)<-new.colnames
+Surv.model.df<-melt(xlsx_Surv.df,id.vars="Time [h]",value.name = "survival",variable.name = "Strains")
+colnames(Surv.model.df)[1]<-"time"
+
+split_strains<-
+  lapply(as.character(Surv.model.df$Strains),
+                      function(x) strsplit(x,split="_")[[1]])
+
+Surv.model.df$Strains<-sapply(split_strains, function(x) x[1])
+Surv.model.df$Replicates<-sapply(split_strains, function(x) x[2])
+```
+
+#### Statistics on WT
+
+For the next section we will define and evaluate 4 linear models with increasing levels of complexity, all models rely on a log-transformed survival fraction:
+
+\(1\) a simple linear interaction model with `Strains` and `Time` as factor.
+
+\(2\) a linear interaction model with `Strains` and `Time` as factor including an error term based on the biological `Replicates`
+
+\(3\) a generalized linear interaction model with `Strains` and `Time` as factor and an assumption of a Gamma distribution
+
+\(4\) a generalized linear interaction model with `Strains` and `Time` as factor and an assumption of a Gamma distribution and including an error based on the biological `Replicates`.
+
+```{r}
+#|label: building-WT-model
+WT.Surv.model.df<-Surv.model.df[-grep("envZ\\*",Surv.model.df$Strains),]
+WT.Surv.model.df$Strains=factor(WT.Surv.model.df$Strains,
+                                levels=c("WT","ΔompC","ΔompF"))
+colorPalette<-c("#9B9B9B","#FFC207","#760187")
+
+WT.Surv.model.df$time<-factor(WT.Surv.model.df$time,
+                         levels=sort(unique(WT.Surv.model.df$time)))
+
+#Definition and evaluation of the models using AIC
+linear.models.WT.list<-vector(mode="list",length=4)
+names(linear.models.WT.list)<-c(
+  "lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+linear.models.WT.list[[1]]<-lm(log10(survival)~time*Strains,data=WT.Surv.model.df)
+linear.models.WT.list[[2]]<-lmer(log10(survival)~time*Strains+(1|Replicates),
+                                data=WT.Surv.model.df)
+linear.models.WT.list[[3]]<-glm(survival~time*Strains,
+                                family=stats::Gamma(link="log"),
+                                data=WT.Surv.model.df)
+linear.models.WT.list[[4]]<-glmer(survival~time*Strains+(1|Replicates),
+                                family=stats::Gamma(link="log"),
+                                data=WT.Surv.model.df)
+aic_values<-sapply(linear.models.WT.list,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.WT.model<-linear.models.WT.list[[min.AIC]]
+print(names(linear.models.WT.list)[min.AIC])
+
+#Gamma-model outperforms the gaussian distribution
+
+p.WT<-interactions::interact_plot(model = preferred.WT.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=F)          # Customize line colors
+p.WT<-p.WT+ scale_y_continuous(trans = 'log10',
+                    breaks = c(0.00001, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100),
+                    limits=c(0.00001,100),
+                    labels=scales::label_log()) +
+    labs(y = "Survival fraction",x="Time [h]")+theme_classic()+
+  theme(legend.position="bottom",
+        text=element_text(family = "Calibri",11*10.8/8.8),
+          axis.text = element_text(family = "Calibri",11*10.8/8.8),
+          axis.title=element_text(family="Calibri",12*10.8/8.8,face="bold",color="black"))
+print(p.WT)
+
+#DHARMa model.validation
+sim_res.WT <- simulateResiduals(fittedModel = preferred.WT.model)
+plot(sim_res.WT)
+```
+
+```{r}
+#|label: WT-post-hoc-testing
+summary(preferred.WT.model)
+
+#simplified model (no time interaction, so regardless of time)
+emms.WT<-emmeans(preferred.WT.model,~Strains|time)
+dunnett_test.WT <- contrast(emms.WT, method = "trt.vs.ctrl", ref = c("WT"))
+dunnett.WT.df<-as.data.frame(summary(dunnett_test.WT))
+print(dunnett_test.WT)
+```
+
+#### Statistics on envZ\*
+
+```{r}
+#|label: building-envZ-model
+envZ.Surv.model.df<-Surv.model.df[grep("envZ\\*",Surv.model.df$Strains),]
+envZ.Surv.model.df$Strains=factor(envZ.Surv.model.df$Strains,
+                                levels=c("envZ*L116P","envZ*L116P ΔompC",
+                                         "envZ*L116P ΔompF"))
+colorPalette<-c("black","#FFC207","#760187")
+
+envZ.Surv.model.df$time<-factor(envZ.Surv.model.df$time,
+                         levels=sort(unique(envZ.Surv.model.df$time)))
+
+#Definition and evaluation of the models using AIC
+linear.models.envZ.list<-vector(mode="list",length=4)
+names(linear.models.envZ.list)<-c("lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+linear.models.envZ.list[[1]]<-lm(log10(survival)~time*Strains,data=envZ.Surv.model.df)
+linear.models.envZ.list[[2]]<-lmer(log10(survival)~time*Strains+(1|Replicates),
+                                data=envZ.Surv.model.df)
+linear.models.envZ.list[[3]]<-glm(survival~time*Strains,
+                                family=stats::Gamma(link="log"),
+                                data=envZ.Surv.model.df)
+linear.models.envZ.list[[4]]<-glmer(survival~time*Strains+(1|Replicates),
+                                family=stats::Gamma(link="log"),
+                                data=envZ.Surv.model.df)
+aic_values<-sapply(linear.models.envZ.list,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.envZ.model<-linear.models.envZ.list[[min.AIC]]
+print(names(linear.models.envZ.list)[min.AIC])
+
+
+p.envZ<-interactions::interact_plot(model = preferred.envZ.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=F)          # Customize line colors
+print(p.envZ)
+
+#DHARMa model.validation
+sim_res.envZ<-simulateResiduals(fittedModel=preferred.envZ.model)
+plot(sim_res.envZ)
+```
+
+```{r}
+#|label: envZ-post-hoc-testing
+summary(preferred.envZ.model)
+#Multiple comparisons (Dunnett)
+emms.envZ<-emmeans(preferred.envZ.model,~Strains|time)
+dunnett_test.envZ <- contrast(emms.envZ, method = "dunnett", ref = "envZ*L116P")
+dunnett.envZ.df<-as.data.frame(summary(dunnett_test.envZ))
+print(dunnett_test.envZ)
+```
+
+#### Compare ompC strains to WT
+
+```{r}
+#|label: building-ompC-model
+ompC.Surv.model.df<-Surv.model.df[grep("WT|ompC",Surv.model.df$Strains),]
+ompC.Surv.model.df$Strains=factor(ompC.Surv.model.df$Strains,
+                                levels=c("WT","ΔompC",
+                                         "envZ*L116P ΔompC"))
+colorPalette<-c("#9B9B9B","#FFC207","#FFC207")
+ompC.Surv.model.df$time<-factor(ompC.Surv.model.df$time,
+                         levels=sort(unique(ompC.Surv.model.df$time)))
+
+#Definition and evaluation of the models using AIC
+linear.models.ompC.list<-vector(mode="list",length=4)
+names(linear.models.ompC.list)<-c("lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+linear.models.ompC.list[[1]]<-lm(log10(survival)~time*Strains,data=ompC.Surv.model.df)
+linear.models.ompC.list[[2]]<-lmer(log10(survival)~time*Strains+(1|Replicates),
+                                data=ompC.Surv.model.df)
+linear.models.ompC.list[[3]]<-glm(survival~time*Strains,
+                                family=stats::Gamma(link="log"),
+                                data=ompC.Surv.model.df)
+linear.models.ompC.list[[4]]<-glmer(survival~time*Strains+(1|Replicates),
+                                family=stats::Gamma(link="log"),
+                                data=ompC.Surv.model.df)
+aic_values<-sapply(linear.models.ompC.list,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.ompC.model<-linear.models.ompC.list[[min.AIC]]
+print(names(linear.models.ompC.list)[min.AIC])
+
+p.ompC<-interactions::interact_plot(model = preferred.ompC.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=T)          # Customize line colors
+p.ompC<-p.ompC+scale_y_continuous(trans = 'log10',
+                    breaks = c(0.00001, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100),
+                    limits=c(0.00001,100),
+                    labels=scales::label_log()) +
+    labs(y = "Survival fraction",x="Time [h]")+theme_classic()+
+  theme(legend.position="bottom",
+        text=element_text(family = "Calibri",11*10.8/8.8),
+          axis.text = element_text(family = "Calibri",11*10.8/8.8),
+          axis.title=element_text(family="Calibri",12*10.8/8.8,face="bold",color="black"))
+print(p.ompC)
+
+#DHARMa model.validation
+sim_res.ompC<-simulateResiduals(fittedModel=preferred.ompC.model)
+plot(sim_res.ompC)
+```
+
+```{r}
+#|label: ompC-post-hoc-testing
+summary(preferred.ompC.model)
+#simplified model (no time interaction, so regardless of time)
+emms.ompC<-emmeans(preferred.ompC.model,~Strains|time)
+dunnett_test.ompC <- contrast(emms.ompC, method = "trt.vs.ctrl", ref = "WT")
+dunnett.ompC.df<-as.data.frame(summary(dunnett_test.ompC))
+print(dunnett_test.ompC)
+```

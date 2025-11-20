@@ -1,0 +1,233 @@
+---
+title: "Fig8_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(aomisc)
+library(QurvE)
+library(PMCMRplus)
+library(QurvE)
+library(reshape2)
+library(ggplot2)
+library(ggpubr)
+library(round)
+library(car)
+library(svglite)
+library(propagate)
+library(extrafont)
+library(svglite)
+library(propagate)
+```
+
+## Specify path towards xlsx file
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on EtOH production data
+
+#### Reformat xlsx data
+
+```{r}
+xlsx_EtOH.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S30_Data.xlsx",sep="//")))
+new.colnames<-colnames(xlsx_EtOH.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_EtOH.df)<-new.colnames
+
+xlsx_EtOH_model.df<-melt(xlsx_EtOH.df,id.vars="Time [h]",value.name = "EtOH [g]",variable.name = "Strain")
+xlsx_EtOH_model.df$Strain<-gsub(
+  "_EtOH \\[g\\]","",xlsx_EtOH_model.df$Strain)
+```
+
+#### Fit non-linear models
+
+```{r}
+unique.strains<-as.character(unique(unique(xlsx_EtOH_model.df$Strain)))
+EtOH_production.df<-as.data.frame(matrix(nrow=length(unique.strains),
+                                         ncol=3))
+colnames(EtOH_production.df)<-c("Strain","Prod.rate","p-value")
+svglite(filename=paste(dir.path,"OutputFiles","Fig8_GompertzPlotsProduction.svg",sep="\\"))
+par(mfrow=c(4,3))
+for (s in seq(1,length(unique.strains))){
+  xlsx_EtOH_model_s.df<-subset(
+  xlsx_EtOH_model.df,xlsx_EtOH_model.df$Strain==unique.strains[s])
+  
+  EtOH.model<-nls(`EtOH [g]`~NLS.G4(`Time [h]`,b,c,d,e),
+                  data=xlsx_EtOH_model_s.df)
+  
+  b_est=as.numeric(coefficients(EtOH.model)[1])
+  p_val<-summary(EtOH.model)$parameters[1,4]
+  
+  EtOH_production.df[s,1]<-unique.strains[s]
+  EtOH_production.df[s,2]<-b_est
+  EtOH_production.df[s,3]<-p_val
+  
+  plot(EtOH.model,main=unique.strains[s],xlab="Time [h]",ylab="EtOH [g]",
+       xlim=c(0,210),ylim=c(0,9))
+  axis(1,at=seq(0,200,by=50,labels=seq(0,200,by=50)))
+  axis(2,at=seq(0,9,by=1),labels=seq(0,9,by=1))
+}
+dev.off()
+write.xlsx(x=EtOH_production.df,
+           file=paste(dir.path,"OutputFiles",                                       "Fig8_productionParameters.xlsx",sep="\\"))
+```
+
+statistics on data.
+
+```{r}
+split_strains<-
+  lapply(as.character(EtOH_production.df$Strain),
+                      function(x) strsplit(x,split="_")[[1]])
+EtOH_production.df$Strain<-sapply(split_strains, function(x) x[1])
+EtOH_production.df$Replicates<-sapply(split_strains, function(x) x[2])
+EtOH_production.df$Strain<-factor(EtOH_production.df$Strain,
+                                  levels=c("WT","envZ*L116P"))
+
+production.models<-vector(mode="list",length=4)
+names(production.models)<-c("lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+
+production.models[[1]]<-lm(Prod.rate~Strain,
+                             data=EtOH_production.df)
+production.models[[2]]<-lmer(Prod.rate~Strain+(1|Replicates),
+                             data=EtOH_production.df)
+production.models[[3]]<-glm(Prod.rate~Strain,
+                             data=EtOH_production.df,
+                             family=stats::Gamma(link="identity"))
+production.models[[4]]<-glmer(Prod.rate~Strain+(1|Replicates),
+                             data=EtOH_production.df,
+                             family=stats::Gamma(link="identity"))
+
+aic_values<-sapply(production.models[1:4],AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.production.model<-production.models[[min.AIC]]
+print(names(production.models)[min.AIC])
+
+#DHARMa model.validation
+sim_res.production<-simulateResiduals(fittedModel = preferred.production.model)
+plot(sim_res.production)
+
+
+summary(preferred.production.model)
+#Statistical interference
+em.production<-emmeans(preferred.production.model,~Strain)
+pairwise.test<-contrast(em.production,"pairwise")
+summary(pairwise.test)
+```
+
+#### Global model
+
+```{r}
+xlsx_EtOH_model_global.df<-xlsx_EtOH_model.df
+xlsx_EtOH_model_global.df$Strain<-gsub(pattern="_\\d","",
+                                       xlsx_EtOH_model_global.df$Strain)
+
+xlsx_EtOH_model_global.stat <- xlsx_EtOH_model_global.df %>%
+  group_by(`Time [h]`,Strain) %>%
+  summarise(
+    mean.production=mean(`EtOH [g]`),
+    se=sd(`EtOH [g]`)/sqrt(n()),
+    lower_ci=mean.production-qt(0.975,n()-1)*se,
+    upper_ci=mean.production+qt(0.975,n()-1)*se,
+    .groups="drop"
+  )
+
+WT_EtOH_model_global.df<-subset(xlsx_EtOH_model_global.df,
+                                xlsx_EtOH_model_global.df$Strain=="WT")
+envZ_EtOH_model_global.df<-xlsx_EtOH_model_global.df[grep(pattern="envZ",
+                           xlsx_EtOH_model_global.df$Strain),]
+colnames(WT_EtOH_model_global.df)[1]<-"time"
+colnames(envZ_EtOH_model_global.df)[1]<-"time"
+
+WT_EtOH.model<-nls(`EtOH [g]`~NLS.G4(time,b,c,d,e),
+                  data=WT_EtOH_model_global.df)
+envZ_EtOH.model<-nls(`EtOH [g]`~NLS.G4(time,b,c,d,e),
+                  data=envZ_EtOH_model_global.df)
+
+n.steps<-200
+new_time<-as.data.frame(seq(
+    min(WT_EtOH_model_global.df$time),
+    max(WT_EtOH_model_global.df$time),
+    length.out=n.steps))
+colnames(new_time)<-"time"
+
+WT.simulation<-predictNLS(WT_EtOH.model,newdata=new_time,interval="confidence",alpha=0.05)
+WT.predicted.values<-cbind.data.frame(
+  WT.simulation$summary$Sim.Mean,WT.simulation$summary$`Sim.2.5%`,
+  WT.simulation$summary$`Sim.97.5%`
+)
+colnames(WT.predicted.values)<-c("mean","lower","upper")
+WT.predicted.values$Strains<-rep("WT",dim(WT.predicted.values)[1])
+
+envZ.simulation<-predictNLS(envZ_EtOH.model,newdata=new_time,interval="confidence",alpha=0.05)
+envZ.predicted.values<-cbind.data.frame(
+  envZ.simulation$summary$Sim.Mean,envZ.simulation$summary$`Sim.2.5%`,
+  envZ.simulation$summary$`Sim.97.5%`
+)
+colnames(envZ.predicted.values)<-c("mean","lower","upper")
+envZ.predicted.values$Strains<-rep("envZ*L116P",dim(envZ.predicted.values)[1])
+
+new_time<-rbind(new_time,new_time)
+predicted.values<-rbind.data.frame(WT.predicted.values,envZ.predicted.values)
+new_time<-cbind.data.frame(new_time,predicted.values)
+```
+
+```{r}
+xlsx_EtOH_model_global.stat$Strain<-
+  factor(xlsx_EtOH_model_global.stat$Strain,levels=c("WT","envZ*L116P"))
+
+new_time$Strains<-factor(new_time$Strains,levels=c("WT","envZ*L116P"))
+
+p.EtOH<-ggplot()+
+  geom_ribbon(data=new_time,aes(x=time,ymin=lower,ymax = upper, 
+                  fill = factor(Strains)), alpha=0.2, linetype=0)+
+  geom_line(data=new_time, aes(x=time, y=mean, color=factor(Strains),
+                                 linetype=factor(Strains)),linewidth=1.2)+
+  geom_errorbar(data=xlsx_EtOH_model_global.stat,
+            aes(x=`Time [h]`,ymin=lower_ci,ymax=upper_ci,color=factor(Strain)),
+    width=0.5,linewidth=0.8)+
+  geom_point(data = xlsx_EtOH_model_global.stat, aes(x=`Time [h]`,
+                                                     y=mean.production,
+                                                     fill=factor(Strain),
+                                                     shape=factor(Strain)),
+                                                     size=3)+
+  labs(x = "Time [h]", y = "EtOH [g]")+
+  scale_x_continuous(breaks=seq(0,200,by=24),limits=c(0,200,50))+
+  scale_y_continuous(breaks=seq(-0,9,by=1),limits=c(-0.5,9.5))+
+  theme_minimal()+
+    theme(panel.grid=element_blank(),
+          axis.line=element_line(color="black"),
+          axis.ticks = element_line(color="black"),
+          text=element_text(family = "Calibri",11),
+          axis.text = element_text(family = "Calibri",11),
+          axis.title=element_text(family="Calibri",
+                                  12,face="bold",color="black"),
+          legend.position="none")+
+  scale_color_manual(values=c("#000000", "#A00000"))+
+    scale_fill_manual(values=c("#000000","#A00000"))+
+    scale_shape_manual(values=c(21,23))
+
+ggsave(plot=p.EtOH,filename=paste(dir.path,"OutputFiles",
+                                  "Fig8 - EtOH production.svg",sep="\\"),
+       width=90,height=80,units="mm")
+```

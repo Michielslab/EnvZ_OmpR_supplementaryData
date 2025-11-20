@@ -1,0 +1,319 @@
+---
+title: "Fig2_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(aomisc)
+library(QurvE)
+library(PMCMRplus)
+library(reshape2)
+library(effects)
+library(lme4)
+library(interactions)
+library(extrafont)
+loadfonts(device = "win")
+library(ggpubr)
+library(scales)
+library(DHARMa)
+library(emmeans)
+```
+
+## Specify path towards xlsx file
+
+You can add options to executable code like this
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on *Survival*
+
+### Open xlsx file and transform into data frame for model fitting
+
+```{r}
+xlsx_Surv.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S3_Data.xlsx",sep="//")))
+#Replace numbered colnames with strain designations
+new.colnames<-colnames(xlsx_Surv.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_Surv.df)<-new.colnames
+Surv.model.df<-melt(xlsx_Surv.df,id.vars="Time [h]",value.name = "survival",variable.name = "Strains")
+Surv.model.df<-melt(xlsx_Surv.df,id.vars="Time [h]",value.name = "survival",variable.name = "Strains")
+colnames(Surv.model.df)[1]<-"time"
+
+split_strains<-
+  lapply(as.character(Surv.model.df$Strains),
+                      function(x) strsplit(x,split="_")[[1]])
+
+Surv.model.df$Strains<-sapply(split_strains, function(x) x[1])
+Surv.model.df$Replicates<-sapply(split_strains, function(x) x[2])
+```
+
+### Perform linear modeling
+
+For the next section we will define and evaluate 4 linear models with increasing levels of complexity, all models rely on a log-transformed survival fraction:
+
+\(1\) a simple linear interaction model with `Strains` and `Time` as factor.
+
+\(2\) a linear interaction model with `Strains` and `Time` as factor including an error term based on the biological `Replicates`
+
+\(3\) a generalized linear interaction model with `Strains` and `Time` as factor and an assumption of a Gamma distribution
+
+\(4\) a generalized linear interaction model with `Strains` and `Time` as factor and an assumption of a Gamma distribution and including an error based on the biological `Replicates`.
+
+```{r}
+Strains.order<-c("WT","ΔompR","envZ*","envZ* ΔompR","ΔenvZ")
+Surv.model.df$Strains<-factor(Surv.model.df$Strains,
+                            levels=Strains.order)
+
+colorPalette<-c("#808080","#A00000","#000000","#A00000","#808080")
+```
+
+```{r}
+#|label: model-building
+Surv.model.df$time<-factor(Surv.model.df$time,
+                         levels=sort(unique(Surv.model.df$time)))
+
+#Definition and evaluation of the models using AIC
+linear.models.list<-vector(mode="list",length=4)
+names(linear.models.list)<-c("lm.gaussian","lme.gaussian","glm.gamma","glme.gamma")
+linear.models.list[[1]]<-lm(log10(survival)~time*Strains,data=Surv.model.df)
+linear.models.list[[2]]<-lmer(log10(survival)~time*Strains+(1|Replicates),
+                                data=Surv.model.df)
+linear.models.list[[3]]<-glm(survival~time*Strains,
+                                family=stats::Gamma(link="log"),
+                                data=Surv.model.df)
+linear.models.list[[4]]<-glmer(survival~time*Strains+(1|Replicates),
+                                family=stats::Gamma(link="log"),
+                                data=Surv.model.df)
+aic_values<-sapply(linear.models.list,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.model<-linear.models.list[[min.AIC]]
+print(names(linear.models.list)[min.AIC])
+
+p.Surv<-interactions::interact_plot(model = preferred.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=F)          # Customize line colors
+p.Surv<-p.Surv+ scale_y_continuous(trans = 'log10',
+                    breaks = c(0.00001, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100),
+                    limits=c(0.00001,100),
+                    labels=scales::label_log()) +
+    labs(y = "Survival fraction",x="Time [h]")+theme_classic()+
+  theme(legend.position="bottom",
+        text=element_text(family = "Calibri",11*10.8/8.8),
+          axis.text = element_text(family = "Calibri",11*10.8/8.8),
+          axis.title=element_text(family="Calibri",12*10.8/8.8,face="bold",color="black"))
+print(p.Surv)
+
+#DHARMa model.validation
+sim_res <- simulateResiduals(fittedModel = preferred.model)
+plot(sim_res)
+```
+
+```{r}
+#|label: post-hoc-testing
+summary(preferred.model)
+#simplified model (no time interaction, so regardless of time)
+em.interactions<-emmeans(preferred.model,~Strains|time)
+dunnett_test <- contrast(em.interactions, method = "trt.vs.ctrl", ref = "WT",
+                         adjust="dunnett")
+dunnett.df<-as.data.frame(summary(dunnett_test))
+print(dunnett_test)
+```
+
+## Perform statistics on *OD-data*
+
+### Open xlsx file and reshape data into QurvE compatible format
+
+```{r}
+xlsx_OD.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S2_Data.xlsx",sep="//")))
+xlsx_OD.statistics<-xlsx_OD.df
+new.colnames<-colnames(xlsx_OD.df)
+new.colnames.statistics<-colnames(xlsx_OD.df)
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d",new.colnames[c])==F){
+    i=1
+    last.strain=new.colnames[c]
+    new.colnames.statistics[c]=paste(new.colnames.statistics[c],i,sep="_")
+  }else{
+    i=i+1
+    new.colnames[c]=last.strain
+    new.colnames.statistics[c]=paste(last.strain,i,sep="_")
+  }
+}
+colnames(xlsx_OD.df)<-new.colnames
+colnames(xlsx_OD.df)<-gsub("\\*","",colnames(xlsx_OD.df))
+
+colnames(xlsx_OD.statistics)<-new.colnames.statistics
+colnames(xlsx_OD.statistics)<-gsub("\\*","",colnames(xlsx_OD.statistics))
+```
+
+```{r}
+Time<-as.numeric(c(rep("",2),xlsx_OD.df$`Time [h]`))
+Blank<-c(rep("",2),rep(0,dim(xlsx_OD.df)[1]))
+Strains.v<-tail(unique(colnames(xlsx_OD.df)),n=-1)
+Replicates<-vector(mode="numeric",length=dim(xlsx_OD.df)[2]-1)
+for (s in Strains.v){
+  position<-grep(pattern=paste0("^",s,"$"),colnames(xlsx_OD.df))-1
+  for (p in position){
+    Replicates[p]<-which(position==p)
+  }
+}
+Replicates<-rbind.data.frame(Replicates)
+colnames(Replicates)<-tail(colnames(xlsx_OD.df),n=-1)
+Concentration<-rbind.data.frame(rep(0,dim(Replicates)[2]))
+colnames(Concentration)<-tail(colnames(xlsx_OD.df),n=-1)
+onlyOD.df<-xlsx_OD.df[,2:dim(xlsx_OD.df)[2]]
+colnames(onlyOD.df)<-colnames(Concentration)
+qurvE.df<-cbind.data.frame(Time,Blank,
+                 rbind.data.frame(Replicates,Concentration,
+                 onlyOD.df)
+)
+write.csv(qurvE.df,file=paste(dir.path,"OutputFiles","Fig2_qurvE.csv",sep="\\"))
+```
+
+### Fit the spline growth model using QurvE
+
+```{r}
+growthData<-read_data(data.growth=paste(
+  dir.path,"OutputFiles","Fig2_qurvE.csv",sep="\\"),
+                      csvsep = ",",
+                      dec=".",
+                      subtract.blank=FALSE,
+                      calib.growth = NULL
+                      )
+growthData$time<-growthData$time[-1,]
+grofit<-growth.workflow(grodata = growthData,fit.opt='s',ec50=FALSE,
+                           log.y.spline=TRUE,
+                        suppress.messages = TRUE, export.res = FALSE)
+plot(grofit,data.type='spline',log.y = FALSE)
+
+gcTable<-grofit$gcFit$gcTable
+gcTable.spline<-gcTable[,c(1:3,grep("spline",colnames(gcTable)))]
+write.xlsx(gcTable.spline,file=paste(dir.path,"OutputFiles",
+                                     "Fig2-SplineParameters.xlsx",sep="\\"))
+```
+
+### Performing statistics on QurvE-generated output
+
+For test statistics displayed in `Fig S5`
+
+#### Reorder the factors first
+
+```{r}
+gcTable.spline$TestId<-factor(gcTable.spline$TestId,
+                              levels=as.character(unique(gcTable.spline$TestId)))
+```
+
+#### OD.difference statistics
+
+`OD.difference` (hence OD_end - OD_start) is called `dY` parameter in `grofit` output.
+
+```{r}
+levene.dY.test<-LeveneTest(as.numeric(dY.spline)~TestId,gcTable.spline)
+print(levene.dY.test) #variance = equal
+res.dY.aov<-aov(as.numeric(dY.spline)~TestId,data=gcTable.spline)
+summary(res.dY.aov)
+Dunnet.dY.df<-as.data.frame(DunnettTest(
+  x=as.numeric(gcTable.spline$dY.spline),
+            g=gcTable.spline$TestId)$`"WT"`)
+```
+
+### OD curves with splines interpolation
+
+```{r}
+xlsx_OD.stat.df<-melt(
+  xlsx_OD.statistics,id.vars="Time [h]",value.name = "OD",variable.name = "Strains")
+xlsx_OD.stat.df$Strains<-gsub(
+  pattern="_\\d","",xlsx_OD.stat.df$Strains)
+colnames(xlsx_OD.stat.df)[1]<-"time"
+
+OD.statistics<-xlsx_OD.stat.df %>%
+  group_by(time,Strains) %>%
+  summarize(
+    mean_OD=mean(OD),
+    se_OD=sd(OD)/sqrt(n()),
+    ci_lower_OD=mean_OD-qt(0.975,n()-1)*se_OD,
+    ci_upper_OD=mean_OD+qt(0.975,n()-1)*se_OD,
+    .groups="drop"
+  )
+```
+
+```{r}
+spline.interpolation.OD<-
+  OD.statistics %>%
+  group_by(Strains) %>%
+  do({
+    spline_result<-as.data.frame(spline(.$time,.$mean_OD))
+    spline_result$Strains<-unique(.$Strains)
+    spline_result
+  })
+```
+
+```{r}
+Strains.order<-c("WT","ΔenvZ","ΔompR","envZ*","envZ* ΔompR")
+spline.interpolation.OD$Strains<-factor(spline.interpolation.OD$Strains,
+                      levels = gsub("\\*","",Strains.order))
+OD.statistics$Strains<-factor(OD.statistics$Strains,
+                              levels=gsub("\\*","",Strains.order))
+
+pOD<-ggplot() +
+  geom_line(data = spline.interpolation.OD,
+              aes(x = x, y = y, color = factor(Strains),
+                                 linetype=factor(Strains)),linewidth = 1,
+            alpha=0.75) +
+  geom_errorbar(data=OD.statistics,
+            aes(x=time,ymin=ci_lower_OD,ymax=ci_upper_OD,
+                color=factor(Strains)),
+    width=0.5,linewidth=0.5)+
+  geom_point(
+    data = OD.statistics, aes(x = time, y = mean_OD, 
+    fill = factor(Strains),shape=factor(Strains)), size = 3) +
+  labs(
+    x = "Time [h]", y = expression(OD[595]),
+    color = "Strains", fill = "Strains")+
+  scale_x_continuous(breaks=seq(0,12,by=2),limits=c(-0.5,12.5))+
+  scale_y_continuous(breaks=seq(0,0.4,by=0.1),limits=c(-0.01,0.4))+
+  theme_minimal()+
+    theme(panel.grid=element_blank(),
+          axis.line=element_line(color="black"),
+          axis.ticks = element_line(color="black"),
+          text=element_text(family = "Calibri",11*10.8/8.8),
+          axis.text = element_text(family = "Calibri",11*10.8/8.8),
+          axis.title=element_text(family="Calibri",12*10.8/8.8,
+                                  face="bold",color="black"),
+          legend.position="bottom")+
+  scale_color_manual(values=c("#808080","#808080","#A00000","#000000","#A00000"))+
+    scale_fill_manual(values=c("#808080","#808080","#A00000","#000000","#A00000"))+
+    scale_shape_manual(values=c(21,22,21,23,23))+
+  scale_linetype_manual(values=c("solid","solid","solid","dotted","dotted"))
+ggsave(pOD,file=paste(dir.path,"OutputFiles","Fig2-OD.svg",sep="\\"),
+       width=180/2,height=80,units="mm")
+```
+
+## 

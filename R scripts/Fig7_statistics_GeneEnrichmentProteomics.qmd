@@ -1,0 +1,542 @@
+---
+title: "ClusterProfiler Analysis"
+author: "Thomas Schalck"
+format: html
+editor: visual
+---
+
+## Install
+
+## Loading required packages
+
+```{r}
+library(BiocManager)
+library(readxl)
+library(openxlsx)
+library(stringr)
+library(doBy)
+library(ggplot2)
+library(ggpubr)
+library(dipsaus)
+library(emmeans)
+library(car)
+```
+
+## Open protein dataset
+
+Open `excel` file containing the differential expression data:
+
+```{r}
+#|label: upload-MS-results
+dir.open<-choose.dir()
+difExpr.df<-data.frame(
+  read.xlsx(paste(dir.open,"S25_Data.xlsx",sep="//")
+            ))
+dir.output<-paste(dir.open,"OutputFiles",sep="//")
+```
+
+#### Select the strains to compare
+
+```{r}
+#|label: choose-strains-to-compare
+comparisons<-c("1. WTvsenvZ","2. WTvsenvZ.ompF_ompF","3. envZvsenvZ.ompF_ompF","4. all")
+comparison.option=ask_or_default(paste0("Which strains to compare: ?:",
+                      paste(comparisons,collapse=", ")),default=1)
+comparison.select<-gsub("^\\d{1}\\. ","",comparisons[as.numeric(comparison.option)])
+if (as.numeric(comparison.option)!=4){
+  col.names<-c("Gene.names","Protein.IDs",paste0(comparison.select,"_"))
+  col.select<-grep(pattern=paste(col.names,collapse="|"),colnames(difExpr.df))
+  difExpr_select.df<-difExpr.df[,col.select]
+}else{
+  difExpr_select.df<-difExpr.df
+}
+```
+
+## GO analysis using clusterProfiler
+
+#### Install and load packages
+
+```{r}
+#|label: load-and-install-clusterProfiler-packages
+library(GOfuncR)
+library(clusterProfiler)
+library(org.EcK12.eg.db)
+library(AnnotationDbi)
+library(UniProt.ws)
+library(queryup)
+library(openxlsx)
+library(enrichplot)
+```
+
+#### Open list of proteins and entrezIDs
+
+We previously already constructed a handy excel file listing for all proteins, their names, UniProtKB_id and their entrezID.
+
+```{r}
+#|label: open-protein-list-files
+dir.open.list<-paste(dir.open,"OutputFiles",
+                     "Fig1_geneProteinEntrezID.xlsx",sep="\\")
+protein.gene.ID.info.df<-as.data.frame(read.xlsx(dir.open.list))
+```
+
+#### Define significance level
+
+```{r}
+stat.level=ask_or_default(paste0("Which significance level?:",
+            paste(c("1. medium-stringent (0.05)",
+                    "2. super-stringent (0.01)"),collapse=", ")),
+            default=1
+                )
+#medium-strength = 0.05 FDR and super-stringent = 0.01 FDR
+if (comparison.option!=4){
+  if (as.numeric(stat.level)==1){
+    c=1
+    stat.level.title<-"medium-stringent"
+  }else{
+    c=2
+    stat.level.title<-"super-stringent"
+  }
+  sign.genes=paste(difExpr_select.df$Gene.names[which(difExpr_select.df[,c]=="+")],
+      collapse="|")
+  difExpr_select_treshold.df<-difExpr_select.df[
+    grep(pattern="^\\+$",difExpr_select.df[,c]),]
+}else{
+  FDR<-c(0.05,0.01)[as.numeric(stat.level)]
+  stat.level.title<-c("medium-stringent","super-stringent")[stat.level]
+  sign.df<-difExpr_select.df[,grep(pattern=paste(paste0("FDR",FDR),"Gene.names",
+                                                 sep="|"),
+                                   colnames(difExpr_select.df))]
+  sign.df[is.na(sign.df)]<-0
+  sign.df[sign.df=="+"]<-1
+  sign.genes.v<-c()
+  for (r in seq(1,dim(sign.df)[1])){
+    if (sum(as.numeric(sign.df[r,1:3]))>0){
+      sign.genes.v<-c(sign.genes.v,sign.df$Gene.names[r])
+    }
+  }
+  sign.genes<-paste(sign.genes.v,collapse="|")
+}
+sign.IDs<-unique(protein.gene.ID.info.df$entrezID[grep(pattern=sign.genes,
+                                     protein.gene.ID.info.df$Gene.synonyms)])
+#quick checkup
+if (length(strsplit(sign.genes,split="\\|")[[1]])==length(sign.IDs)){
+  print("OK")
+}else{
+  print("NOK")
+}
+
+write.csv(sign.IDs,file=
+            paste(
+          dir.output,paste(paste("Fig7_ID-list",stat.level.title,sep="_"),"csv",sep="."),
+          sep="\\"),
+          row.names = F, col.names = F
+)
+write.csv(x=strsplit(sign.genes,split="\\|")[[1]],
+          file=paste(dir.output,
+                     paste(
+                       paste("Fig7_genes-list",stat.level.title,sep="_"),"csv",sep="."),sep="\\"),row.names=F, col.names=F)
+```
+
+```{r}
+p.cutoff=as.numeric(ask_or_default('Provide a cutoff value for p: ',
+                                   default='0.01'))
+for (g in c("CC","MF","BP")){
+  goo<-enrichGO(gene=as.character(sign.IDs),
+                universe = as.character(na.omit(protein.gene.ID.info.df$entrezID)),
+                OrgDb = org.EcK12.eg.db,
+                ont=g,
+                keyType = "ENTREZID",
+                pAdjustMethod = "BH",
+                pvalueCutoff = p.cutoff,
+                qvalueCutoff = 0.05,
+                readable = T)
+  assign(paste("goo",g,sep="_"),goo)
+}
+```
+
+```{r}
+for (g in c("CC","BP","MF")){
+  plot.data<-get(paste("goo",g,sep="_"))
+  if (g=="CC"){
+      gg.title="Cellular Component"
+  }else if(g=="MF"){
+      gg.title="Molecular Function"
+  }else{
+    gg.title="Biological Process"
+  }
+  p_bar<-barplot(plot.data,title=gg.title)+
+    theme(legend.position = "bottom",legend.justification = "left",
+          legend.spacing.x = unit(0,"cm"))
+  p_dot<-dotplot(plot.data) #optional plot
+  p_nw<-cnetplot(plot.data,
+                 categorySize="pvalue",
+                 foldChange=as.character(
+                   na.omit(protein.gene.ID.info.df$entrezID)),
+                 colorEdge=T,
+                 circular=T,
+                 node_label="gene")+
+    theme(legend.position = "bottom",legend.direction = "vertical")
+  assign(paste("p_bar",g,sep="_"),p_bar)
+  assign(paste("p_dot",g,sep="_"),p_dot)
+  assign(paste("p_nw",g,sep="_"),p_nw)
+}
+```
+
+```{r}
+for (g in c("CC","BP","MF")){
+  if (g=="CC"){
+      plot.component="CC"
+  }else if(g=="MF"){
+      plot.component="MF"
+  }else{
+    plot.component="BP"
+  }
+  p.arrange.bar.nw<-ggarrange(get(paste("p_bar",g,sep="_")),
+                              get(paste("p_nw",g,sep="_")))
+  plot.name<-paste0("Fig7_",paste(paste("overview",
+                        plot.component,comparison.select,
+                         stat.level.title,
+                         sep="_"),"svg",sep="."))
+  ggsave(plot = p.arrange.bar.nw,filename = paste(dir.output,plot.name,sep="\\"),
+         width = 450, height = 450, units="mm",dpi=300)
+}
+```
+
+I opted for cutoff of FDR = 0.05 for all the analyses (=medium-stringent).
+
+## Gene enrichment using GofuncR
+
+```{r}
+#|label: compile-gene_ids-dataframe
+Is_candidate<-rep(0,dim(protein.gene.ID.info.df)[1])
+for (c in 1:length(Is_candidate)){
+  if (!is.na(
+    match(
+      protein.gene.ID.info.df$entrezID[c],sign.IDs))){
+    Is_candidate[c]=1
+  }
+}
+
+input.go.dataframe<-na.omit(data.frame(
+  gene_ids=protein.gene.ID.info.df$gene.SYMBOL,is_candidate=Is_candidate
+))
+
+#validation-step
+length(input.go.dataframe$is_candidate[which(input.go.dataframe$is_candidate==1)])
+length(sign.IDs)
+
+#perform GO enrichment using GOfuncR
+enriched.go<-go_enrich(input.go.dataframe,orgDb='org.EcK12.eg.db')
+go.stats<-enriched.go[[1]]
+
+significant.enriched<-go.stats[
+  go.stats$raw_p_underrep<=0.05|go.stats$raw_p_overrep<=0.05,
+]
+
+#Write the results into a xlsx.file
+wb=createWorkbook()
+for (GO in unique(significant.enriched$ontology)){
+  sheet_name<-GO
+  GO.subset<-subset(significant.enriched,
+                    significant.enriched$ontology==GO)
+  addWorksheet(wb,sheet_name)
+  writeData(wb,sheet_name,GO.subset)
+}
+saveWorkbook(wb,file=paste(dir.output,"Fig7_GO_summary_proteomics.xlsx",sep="\\"
+                           ),overwrite=T)
+```
+
+## Create plots of individual significant hits
+
+#### Reduce the dataframe to the proteins (genes) that are differentially expressed.
+
+Normalization of protein abundances (or better the label free quantification values, LFQ) expressed as 2^log2.PG.MaxLFQ^/sum(2^log2.PG.MaxLFQ^) and log10-transformed for convenience.
+
+```{r}
+#|label: normalization-of-LFQ.abundances
+difExpr.norm.df<-difExpr.df
+LFQ.columns<-grep("log2\\.PG\\.MaxLFQ",colnames(difExpr.df))
+for (c in LFQ.columns){
+  difExpr.norm.df[,c]=log10(2^difExpr.df[,c]/sum(2^difExpr.df[,c]))
+}
+```
+
+```{r}
+#|label: choose-data-frame
+#By default the normalized protein data are retained
+data.frame.option<-ask_or_default("(1) Absolute or (2) normalized values",                          default=2)
+if (as.numeric(data.frame.option)==1){
+  data.frame.select=difExpr.df
+  y.name=strsplit(colnames(data.frame.select)[17],split="\\.envZ")[[1]][1]
+}else{
+  data.frame.select=difExpr.norm.df
+}
+```
+
+```{r}
+#|label: extract-significant-genes
+#Also ompC is included here
+sign.genes.withOmpC<-paste("ompC",sign.genes,sep="|")
+difExpr_sign.df<-data.frame.select[grep(pattern=sign.genes.withOmpC,
+                                 data.frame.select$Gene.names),]
+col.to.retain<-paste(c("adj.P.Val","Gene.names","log2.PG"),collapse="|")
+difExpr_sign.df<-difExpr_sign.df[,
+                            grep(pattern=col.to.retain,colnames(difExpr_sign.df))]
+```
+
+#### Prepare a template dataframe
+
+```{r}
+#|label: create-pre-dataframe
+n.reps<-length(unique(na.omit(str_extract(pattern="rep\\d$",
+                                            colnames(difExpr_sign.df)))))
+strains.v<-c()
+strains.v_edit<-c()
+log2.values<-grep(pattern="log2",colnames(difExpr_sign.df),value=T)
+for (s in log2.values){
+  get.strain<-strsplit(strsplit(s,split="_r")[[1]][1],split="y\\.")[[1]][2]
+  strains.v<-c(strains.v,get.strain)
+  get.strain.edit<-gsub("Z$","Z*",gsub("\\.","* ",gsub("_","'|",get.strain)))
+  strains.v_edit<-c(strains.v_edit,get.strain.edit)
+}
+
+strains.v<-sort(unique(strains.v),decreasing=T)
+strains.v_edit<-unique(strains.v_edit)
+strains<-sort(rep(strains.v_edit,n.reps),decreasing=T)
+replicates<-rep(c(1,2,3),length(strains.v))
+template.df<-cbind.data.frame(strains,replicates)
+```
+
+```{r}
+#|label: plot-per-gene
+y.min<-floor(min(difExpr_sign.df[,grep(pattern="^log2",
+                                         colnames(difExpr_sign.df))]))
+
+y.max<-ceiling(max(difExpr_sign.df[,grep(pattern="^log2",
+                                           colnames(difExpr_sign.df))]))
+
+sign.genes.v<-strsplit(sign.genes.withOmpC,split="\\|")[[1]]
+list.plots<-vector(mode="list",length = length(sign.genes.v))
+names(list.plots)<-sign.genes.v
+j=1 #counter for sign.genes
+for (g in sign.genes.v){
+  difExpr_perGene.df<-subset(difExpr_sign.df,difExpr_sign.df$Gene.names==g)
+  log2.PG.MaxLFQ.intensity<-vector(mode="numeric",dim(template.df)[1])
+  plot.title=paste(toupper(substr(g, 1, 1)),
+                   substr(g, 2, nchar(g)), sep="")
+  i=1 #counter for strains and replicates 
+  for (s in strains.v){
+    for (r in unique(replicates)){
+      index<-intersect(grep(paste0(s,"_"),colnames(difExpr_perGene.df)),
+                       grep(as.character(paste0(r,"$")),
+                            colnames(difExpr_perGene.df)))
+      log2.PG.MaxLFQ.intensity[i]<-as.numeric(difExpr_perGene.df[,index])
+      i=i+1
+    }
+  }
+  log2.maxLFQ.perGene<-cbind.data.frame(template.df,log2.PG.MaxLFQ.intensity)
+  order.on.x.axis<-unique(log2.maxLFQ.perGene$strains)[c(1,3,2)]
+  log2.maxLFQ.perGene$strains<-factor(log2.maxLFQ.perGene$strains,
+                                      levels=order.on.x.axis)
+  max.labs<-vector(mode="numeric",length=3)
+  for (s in seq(1,length(max.labs)-1)){
+    max.labs[s]<-max(subset(log2.maxLFQ.perGene,
+                            log2.maxLFQ.perGene$strains==order.on.x.axis[s])[,3])+1
+  }
+  y.up<-max(log2.maxLFQ.perGene$log2.PG.MaxLFQ.intensity)+3
+  if (y.up<=6){
+    max.labs[3]<-y.up
+  }else{
+    max.labs[3]<-6
+  }
+  
+  my_comparisons<-list(c(unique(strains)[1],unique(strains)[3]),
+                       c(unique(strains)[3],unique(strains)[2]),
+                       c(unique(strains)[1],unique(strains)[2]))
+  p<-ggplot(log2.maxLFQ.perGene,aes(x=strains,y=log2.PG.MaxLFQ.intensity))+
+    geom_point(shape=21,size=3,aes(fill=factor(replicates)),
+               position=position_dodge(width=0.3))+
+    scale_fill_manual(name="replicate",
+              values=c(as.character(palette.colors(palette = "Okabe-Ito")[2:4])))+
+    stat_summary(fun.data = mean_cl_normal,fun.args = list(mult=1),
+                 geom="errorbar",color="black",width=0.2,linewidth=1)+
+    scale_y_continuous(limits=c(y.min,y.max+4),
+                       breaks=seq(y.min,y.max+2,ceiling((y.max+2-y.min)/5)))+
+    stat_compare_means(method="anova",label.y=y.max+3)+
+    stat_compare_means(comparisons=my_comparisons,
+                       label="p.signif",method="t.test",
+                       p.adjust.methods="tukey",
+                       label.y=max.labs)
+  
+  if (as.numeric(data.frame.option)==2){
+    p<-p+labs(y=expression(log[10]~"(Protein fraction)"))
+  }else{
+    p<-p+labs(y=y.name)
+  }
+  p<-p+theme_classic()+
+    ggtitle(plot.title)+
+    theme(axis.text.x = element_text(angle=45,vjust=1,hjust=1),
+          axis.title.x = element_blank(),aspect.ratio = 1,
+          legend.position = "none",
+          plot.title = element_text(face="bold"))
+  list.plots[[j]]<-p
+  j=j+1
+}
+```
+
+#### Group plots together
+
+PPT: Dimensions: 4 x 2
+
+Paper format: Dimensions: 2 x 4
+
+```{r}
+n.plots<-length(list.plots)
+plot.name<-as.character(ask_or_default("Provide the name of the plots"))
+plots.per.page<-as.character(ask_or_default("Provide the dimensions (first rows,
+                                            second columns:",default="2,4"))
+n.row<-as.numeric(strsplit(plots.per.page,split=",")[[1]][1])
+n.col<-as.numeric(strsplit(plots.per.page,split=",")[[1]][2])
+n.pages<-ceiling(n.plots/(n.row*n.col))
+for (p in seq(1,n.pages)){
+  p.end<-n.row*n.col*p
+  p.start<-p.end-(n.row*n.col-1)
+  p.arrange<-ggarrange(plotlist = list.plots[p.start:p.end],
+                       nrow = n.row, ncol = n.col)
+  ggname.svg<-paste(dir.output,
+                paste(paste0(plot.name,p),"svg",sep="."),sep="\\")
+  ggname.png<-gsub("\\.svg$",".png",ggname.svg)
+  ggsave(filename = ggname.svg, plot=p.arrange,width = 297,height = 150,
+         units="mm")
+  ggsave(filename = ggname.png,plot=p.arrange,width = 297,height = 150,
+         units="mm",dpi=300)
+}
+```
+
+## Wordcloud generator (just optional)
+
+```{r}
+library(wordcloud)
+library(tm)
+gene.description.df<-as.data.frame(bitr(sign.IDs,fromType = "ENTREZID",
+          toType = "GENENAME",org.EcK12.eg.db))
+gene.description.list<-as.list(gene.description.df$GENENAME)
+gene.description.string<-paste(unlist(gene.description.list),collapse=" ")
+
+text=Corpus(VectorSource(gene.description.string))
+text=tm_map(text,content_transformer(tolower))
+text=tm_map(text,stripWhitespace)
+dtm<-TermDocumentMatrix(text)
+dtm.m<-as.matrix(dtm)
+v<-sort(rowSums(dtm.m),decreasing = T)
+wordcloud.summary<-data.frame(word=names(v),freq=v)
+
+png(filename = paste(dir.output,
+                     "Fig 7 - wordcloud.png",sep="//"))
+wordcloud(words=wordcloud.summary$word,freq=wordcloud.summary$freq,min.freq = 1,max.words=200,random.order = FALSE,rot.per = 0.35,colors=brewer.pal(8,"Dark2"),
+              scale=c(4,.5))
+dev.off()
+```
+
+## Porin abundances
+
+Comparison of porin abundances (OmpC, OmpF) between *envZ*\* and *envZ*\* *ompF*'*/ompF*
+
+Creates the statistics for Fig 5A
+
+```{r}
+genesToSelect<-c("ompC","ompF")
+difExpr.norm.porins.df<-difExpr.norm.df[grep(paste(genesToSelect,collapse="|"),
+                                             difExpr.norm.df$Gene.names),]
+columns.index.select<-c("log2","Gene.names")
+columns.select<-grep(paste(columns.index.select,collapse="|"),
+                     colnames(difExpr.norm.porins.df))
+difExpr.norm.porins.df<-difExpr.norm.porins.df[,columns.select]
+
+difExpr.norm.porins.trans.df<-data.frame(matrix(nrow=0,ncol=4))
+colnames(difExpr.norm.porins.trans.df)<-c("Gene","Strain","Replicate","Abundance")
+for (r in 1:dim(difExpr.norm.porins.df)[1]){
+  porin.name<-difExpr.norm.porins.df[r,1]
+  for (c in 2:dim(difExpr.norm.porins.df)[2]){
+    col.name<-colnames(difExpr.norm.porins.df)[c]
+    replicate<-strsplit(col.name,split="_rep")[[1]][2]
+    strain<-strsplit(strsplit(col.name,split="_rep")[[1]][1],
+                     split="intensity\\.")[[1]][2]
+    strain<-gsub("\\.","* ",(gsub("_","/",strain)))
+    abundance=difExpr.norm.porins.df[r,c]
+    new.row<-cbind.data.frame(Gene=porin.name,Strain=strain,Replicate=replicate,
+                     Abundance=abundance)
+    difExpr.norm.porins.trans.df<-rbind.data.frame(difExpr.norm.porins.trans.df,
+                                                   new.row)
+  }
+}
+```
+
+```{r}
+difExpr.norm.porins.trans.df$Abundance<-10^(difExpr.norm.porins.trans.df$Abundance)
+difExpr.norm.porins.trans.df$Strain[
+  which(difExpr.norm.porins.trans.df$Strain=="envZ")]<-"envZ*"
+difExpr.norm.porins.trans.df$Strain<-factor(difExpr.norm.porins.trans.df$Strain,
+              levels=c("WT","envZ*","envZ* ompF/ompF"))
+fill.colors<-c("#FFC207","#760187")
+p.porins<-ggbarplot(data=difExpr.norm.porins.trans.df,
+                    "Strain","Abundance",
+                    fill="Gene",add="mean_ci",
+                    xlab="Strain",ylab="Protein fraction")+
+    scale_fill_manual(values=fill.colors)+
+      theme(legend.position="none")+
+  theme(
+    axis.title.x=element_blank(),
+    axis.title.y=element_text(family="Calibri",size=12,face="bold"),
+    axis.text=element_text(family="Calibri",size=11)
+  )
+write.xlsx(difExpr.norm.porins.trans.df,file=paste(dir.output,"Fig7 - Porin fractions.xlsx",sep="\\"))
+```
+
+#### Individual porin comparison
+
+```{r}
+#OmpC
+difExpr.norm.OmpC.trans.df<-subset(difExpr.norm.porins.trans.df,
+                                   difExpr.norm.porins.trans.df$Gene=="ompC")
+##ANOVA model
+OmpC.anova<-aov(formula=Abundance~Strain,data=difExpr.norm.OmpC.trans.df)
+residuals.OmpC.aov<-residuals(OmpC.anova)
+shapiro.test(residuals.OmpC.aov) #Normality test = OK
+leveneTest(Abundance~Strain,data=difExpr.norm.OmpC.trans.df) #homogeneity of variances
+##Multiple Comparison
+tukey_mc.OmpC<-emmeans(OmpC.anova, pairwise ~ Strain, adjust = "tukey")
+print(tukey_mc.OmpC)
+tukey_mc.OmpC.df<-as.data.frame(tukey_mc.OmpC$contrasts)
+
+#OmpC
+difExpr.norm.OmpF.trans.df<-subset(difExpr.norm.porins.trans.df,
+                                   difExpr.norm.porins.trans.df$Gene=="ompF")
+##ANOVA model
+OmpF.anova<-aov(formula=Abundance~Strain,data=difExpr.norm.OmpF.trans.df)
+residuals.OmpF.aov<-residuals(OmpF.anova)
+shapiro.test(residuals.OmpF.aov) #Normality test = OK
+leveneTest(Abundance~Strain,data=difExpr.norm.OmpF.trans.df) #homogeneity of variances
+##Multiple Comparison
+tukey_mc.OmpF<-emmeans(OmpF.anova, pairwise ~ Strain, adjust = "tukey")
+print(tukey_mc.OmpF)
+tukey_mc.OmpF.df<-as.data.frame(tukey_mc.OmpF$contrasts)
+```
+
+#### Total porin comparison
+
+```{r}
+total.porins.df<-difExpr.norm.porins.trans.df %>% 
+  group_by(Strain,Replicate) %>%
+  reframe(
+    total.porins=sum(Abundance)
+  )
+#ANOVA
+total.porins.aov<-aov(formula=total.porins~Strain,data=total.porins.df)
+shapiro.test(residuals(total.porins.aov))
+leveneTest(total.porins~Strain,data=total.porins.df)
+#Multiple Comparison
+tukey_mc.totalPorins<-emmeans(total.porins.aov,
+                              pairwise ~ Strain, adjust = "tukey")
+tukey_mc.totalPorins<-as.data.frame(tukey_mc.totalPorins$contrasts)
+```

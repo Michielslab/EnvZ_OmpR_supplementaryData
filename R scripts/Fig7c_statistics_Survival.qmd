@@ -1,0 +1,150 @@
+---
+title: "Fig7c_analysis"
+format: html
+editor: visual
+---
+
+## Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(rstatix)
+library(DescTools)
+library(openxlsx)
+library(reshape2)
+library(effects)
+library(extrafont)
+loadfonts(device = "win")
+library(ggpubr)
+library(RColorBrewer)
+library(lme4)
+library(emmeans)
+library(interactions)
+library(DHARMa)
+```
+
+## Specify path towards xlsx file
+
+```{r}
+dir.path<-choose.dir()
+```
+
+## Perform statistics on *Survival*
+
+### Open xlsx file and transform into data frame for glm fitting
+
+```{r}
+xlsx_Surv.df<-as.data.frame(
+  read_excel(path=paste(dir.path,"S26_Data.xlsx",sep="//")))
+#Replace numbered colnames with strain designations
+new.colnames<-colnames(xlsx_Surv.df)
+index=1
+for (c in seq(2,length(new.colnames))){
+  if(grepl(pattern="\\d$",new.colnames[c])==F){
+    index=1
+    last.strain=new.colnames[c]
+    new.colnames[c]<-paste(last.strain,as.character(index),sep="_")
+  }else{
+    index=index+1
+    new.colnames[c]=paste(last.strain,as.character(index),sep="_")
+  }
+}
+colnames(xlsx_Surv.df)<-new.colnames
+Surv.model.df<-melt(xlsx_Surv.df,id.vars="Time [h]",value.name = "survival",variable.name = "Strains")
+colnames(Surv.model.df)[1]<-"time"
+
+split_strains<-
+  lapply(as.character(Surv.model.df$Strains),
+                      function(x) strsplit(x,split="_")[[1]])
+
+Surv.model.df$Strains<-sapply(split_strains, function(x) x[1])
+Surv.model.df$Replicates<-sapply(split_strains, function(x) x[2])
+```
+
+```{r}
+Surv.statistics<-Surv.model.df %>%
+  group_by(time,Strains) %>%
+  summarize(
+    mean_log_survival=mean(log10(survival)),
+    se_log_survival=sd(log10(survival))/sqrt(n()),
+    ci_lower=mean_log_survival-qt(0.975,n()-1)*se_log_survival,
+    ci_upper=mean_log_survival+qt(0.975,n()-1)*se_log_survival,
+    .groups="drop"
+  )
+```
+
+```{r}
+WT.index<-grep("WT",unique(Surv.model.df$Strains))
+Strains.order<-c(unique(Surv.model.df$Strains)[WT.index],
+                 unique(Surv.model.df$Strains)[-WT.index])
+
+Surv.statistics$Strains<-factor(Surv.statistics$Strains,
+                            levels=Strains.order)
+Surv.model.df$Strains<-factor(Surv.model.df$Strains,
+                            levels=Strains.order)
+
+colorPalette<-c("#808080",gsub("#FFFF99","#FF00FF",brewer.pal(12,"Paired")))
+```
+
+### Perform survival statistics
+
+```{r}
+#|label: model-building
+Surv.model.df$time<-factor(Surv.model.df$time,
+                         levels=sort(unique(Surv.model.df$time)))
+
+Survival.models<-vector(mode="list",length=6)
+names(Survival.models)<-c("lm","lmer","glm.inverse","glmer.inverse",
+                          "glm.log","glmer.log")
+Survival.models[[1]]<-lm(log10(survival)~time*Strains,
+            data=Surv.model.df)
+Survival.models[[2]]<-lmer(log10(survival)~time*Strains+(1|Replicates),
+            data=Surv.model.df)
+Survival.models[[3]]<-glm(log10(survival)~time*Strains,
+                          family=stats::Gamma(link="inverse"),
+                          data=Surv.model.df)
+Survival.models[[4]]<-glmer(log10(survival)~time*Strains+(1|Replicates),
+                          family=stats::Gamma(link="inverse"),
+                          data=Surv.model.df)
+Survival.models[[5]]<-glm(survival~time*Strains,
+            family=stats::Gamma(link="log"),
+            data=Surv.model.df)
+Survival.models[[6]]<-glmer(survival~time*Strains+(1|Replicates),
+            family=stats::Gamma(link="log"),
+            data=Surv.model.df)
+
+Survival.models_cleaned<-Survival.models[!sapply(Survival.models,is.null)]
+aic_values<-sapply(Survival.models_cleaned,AIC)
+min.AIC<-which(aic_values==min(aic_values))
+preferred.model<-Survival.models_cleaned[[min.AIC]]
+print(names(Survival.models_cleaned)[min.AIC])
+
+p<-interactions::interact_plot(model = preferred.model,
+              pred = time,          # Predictor for x-axis
+              modx = Strains,              # Moderator for grouping (Strains)
+              interval = TRUE,             # Add confidence intervals
+              plot.points = TRUE,          # Add raw data points
+              point.alpha = 5,           # Adjust transparency of points
+              colors = colorPalette,
+              vary.lty=F)          # Customize line colors
+p<-p+ 
+    labs(y = "Survival")+theme_classic()+
+  theme(legend.position="bottom")
+p
+#DHARMa model.validation
+sim_res <- simulateResiduals(fittedModel = preferred.model)
+plot(sim_res)
+```
+
+```{r}
+#|label: post-hoc-testing
+summary(preferred.model)
+#Multiple comparison with WT as reference
+emms<-emmeans(preferred.model,~Strains|time)
+dunnett_test <- contrast(emms, method = "trt.vs.ctrl", ref = "WT")
+dunnett_test.df<-as.data.frame(summary(dunnett_test))
+print(dunnett_test)
+```
+
+#### 
